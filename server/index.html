@@ -1928,6 +1928,35 @@ function findBodyJoints(mesh, opts = {}) {
       if (along[s2] > Math.min(reach, 0.7 * limbLen)) break;
       if (r[s2] < r[sMin]) sMin = s2;
     }
+    // refine on the real surface: the smallest true cross-section of this limb near the body
+    if (opts.refine !== false) {
+      const lo = Math.max(0.3 * Rb, 1), hi = Math.min(0.75 * limbLen, along[start] + 3 * Rb);
+      const cand = []; for (let s2 = sb; s2 >= 0; s2--) { if (along[s2] < lo) continue; if (along[s2] > hi) break; cand.push(s2); }
+      if (cand.length) {
+        // only triangles near this stretch of the limb
+        const pts3 = cand.map(s2 => world(path[s2])), rad = (Rb + 2) * h * 2.2;
+        const bmn = [0, 1, 2].map(a => Math.min(...pts3.map(q => q[a])) - rad), bmx = [0, 1, 2].map(a => Math.max(...pts3.map(q => q[a])) + rad);
+        const P = mesh.P, T = mesh.T, keep = [];
+        for (let t = 0; t < T.length; t += 3) {
+          let inside = false;
+          for (let k = 0; k < 3 && !inside; k++) { const v = T[t + k] * 3; if (P[v] >= bmn[0] && P[v] <= bmx[0] && P[v + 1] >= bmn[1] && P[v + 1] <= bmx[1] && P[v + 2] >= bmn[2] && P[v + 2] <= bmx[2]) inside = true; }
+          if (inside) keep.push(t / 3);
+        }
+        const sub0 = subMesh(mesh, keep);
+        let bestS = -1, bestScore = Infinity;
+        for (let q = 0; q < cand.length; q += cand.length > 24 ? 2 : 1) {
+          const s2 = cand[q], c = world(path[s2]), n = dirAt(path, s2, 4), B = basisFor(n);
+          const loopsQ = sectionLoops(sub0, B, dot(B.n, c) + h * 1e-3);
+          if (!loopsQ.length) continue;
+          const lp = [dot(c, B.e1), dot(c, B.e2)];
+          const isl = groupIslands(loopsQ).filter(is => pointInLoops(lp, [loopsQ[is.outer]])).sort((a, b) => a.area - b.area)[0];
+          if (!isl) continue;
+          const score = Math.abs(isl.area) * (1 + 0.12 * along[s2] / Rb);
+          if (score < bestScore) { bestScore = score; bestS = s2; }
+        }
+        if (bestS >= 0) sMin = bestS;
+      }
+    }
     if (!addCut(path, sMin, 'junction', ti)) return;
     const isHead = (() => { const v = sub(world(path[0]), coreW); return dot(v, norm(up)) > 0 && Math.abs(dot(v, norm(up))) > 0.8 * len(v); })();
     if (opts.secondary && !isHead) {

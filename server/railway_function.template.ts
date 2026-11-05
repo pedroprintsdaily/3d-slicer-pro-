@@ -116,7 +116,14 @@ async function runPartPacker(id: string, name: string, data: Uint8Array, opts: R
   const [img] = await gradio(PARTPACKER_URL, "process_image", [file], K().hf);
   jobSet(id, { stage: "PartPacker is building the parts (1 to 3 minutes)", progress: 15 });
   const seed = Number(opts.seed || 0);
-  const [model] = await gradio(PARTPACKER_URL, "process_3d", [img, 50, 7, 384, seed, true, 150000], K().hf);
+  // the demo's own mesh-simplify step can crash; fall back to its unsimplified output
+  let model: any;
+  try { [model] = await gradio(PARTPACKER_URL, "process_3d", [img, 50, 7, 384, seed, false, 100000], K().hf); }
+  catch (e: any) {
+    if (!/AttributeError|TypeError/.test(e?.message || "")) throw e;
+    jobSet(id, { stage: "PartPacker is retrying at a lower grid", progress: 20 });
+    [model] = await gradio(PARTPACKER_URL, "process_3d", [img, 50, 7, 256, seed, false, 100000], K().hf);
+  }
   const url = model.url || `${PARTPACKER_URL}/gradio_api/file=${model.path}`;
   return url as string;
 }

@@ -884,6 +884,13 @@ function cutMeshOnce(mesh, plane, opts = {}) {
       }
     }
   }
+  // bed cut that leaves small islands alone (a fingertip poking across the plane stays on its own piece)
+  if (!opts.localPoint && opts.minIslandFrac) {
+    const big = Math.max(...islands.map(is => Math.abs(is.area)));
+    chosen = islands.filter(is => Math.abs(is.area) >= big * opts.minIslandFrac);
+    if (chosen.length === islands.length) return { error: 'No small islands to leave out.' };
+  }
+  const local = !!opts.localPoint || chosen !== islands;
   const chosenLoops = new Set(); for (const is of chosen) { chosenLoops.add(is.outer); for (const h of is.holes) chosenLoops.add(h); }
   const cutStarts = new Set(); // segment start ids that are cut
   loops.forEach((l, li) => { if (chosenLoops.has(li)) for (const s of l) cutStarts.add(s); });
@@ -905,11 +912,11 @@ function cutMeshOnce(mesh, plane, opts = {}) {
     } else {
       const v = [T[t * 3], T[t * 3 + 1], T[t * 3 + 2]];
       outT.push(v[0], v[1], v[2]); outG.push(g);
-      if (!opts.localPoint) side.push((W[v[0]] + W[v[1]] + W[v[2]]) > 0 ? 1 : 0);
+      if (!local) side.push((W[v[0]] + W[v[1]] + W[v[2]]) > 0 ? 1 : 0);
       else side.push(-1);
     }
   }
-  if (opts.localPoint) {
+  if (local) {
     // flood fill sides across the surface, never crossing the cut loop
     const ntt = outT.length / 3; const edgeMap = new Map();
     for (let t = 0; t < ntt; t++) for (let k = 0; k < 3; k++) {
@@ -1156,8 +1163,15 @@ function chooseCut(m, settings, avoid) {
   for (let i = 0; i < N; i++) ds.push(lo + L * (0.03 + 0.94 * (i + 0.5) / N));
   const { areas } = sectionAreas(m, basisFor(nrm), ds);
   const maxA = Math.max(...areas.map(Math.abs)) || 1;
+  // volume on each side of every sample (from the section areas), to avoid cutting off small stubs
+  const step = ds.length > 1 ? ds[1] - ds[0] : L, cum = [];
+  { let acc = Math.abs(areas[0]) * (ds[0] - lo + step / 2); for (let i = 0; i < N; i++) { cum.push(acc); acc += Math.abs(areas[i]) * step; } }
+  const totV = cum[N - 1] + Math.abs(areas[N - 1]) * (lo + L - ds[N - 1]);
+  const minV = settings.minPieceVol || 0, minT = settings.minThick || 0;
   const cost = ds.map((d, i) => {
     let s = Math.abs(areas[i]) / maxA;
+    if (minV && (cum[i] < minV || totV - cum[i] < minV)) s += 6;
+    if (minT && (d - lo < minT || lo + L - d < minT)) s += 6;
     if (settings.mode === 'even') { const f = (d - lo) / (L / k); s = 0.05 * s + 4 * Math.abs(f - Math.round(f)); }
     for (const a of avoid) if (a.axis === axis && Math.abs(a.d - d) < (a.r || 12)) s += 1.5;
     if (Math.abs(areas[i]) < 1e-6) s += 10;
@@ -1194,21 +1208,38 @@ function autoSplit(pieces, settings, progress) {
     if (fitsBed(pc.mesh, settings.bed, settings.margin) || done.length + queue.length + 1 >= maxPieces) { done.push(pc); continue; }
     const cands = chooseCut(pc.mesh, settings, pc.avoid || []);
     if (!cands) { done.push(pc); continue; }
-    let ok = false;
-    for (let ci = 0; ci < Math.min(8, cands.length); ci++) {
+    let ok = false, fallback = null;
+    const tries = Math.min(settings.minPieceVol || settings.minThick ? 14 : 8, cands.length);
+    for (let ci = 0; ci < tries; ci++) {
       const c = cands[ci];
       const id = cutCounter + 1;
-      const r = cutMesh(pc.mesh, { n: c.n, d: c.d }, { cutId: id, connector: conn, label: settings.label, wall: settings.wall });
+      let r = cutMesh(pc.mesh, { n: c.n, d: c.d }, { cutId: id, connector: conn, label: settings.label, wall: settings.wall });
       if (r.error) continue;
-      if (settings.onCut) settings.onCut(pc.mesh, c, r);
-      cutCounter = id; reports.push(r.report); ok = true;
-      const av = (pc.avoid || []).concat([{ axis: c.axis, d: r.report.d, r: avoidR }]);
-      for (const half of [r.below, r.above]) for (const comp of components(half)) {
-        if (comp.T.length < 12) continue;
-        queue.push({ mesh: comp, avoid: av });
+      const comps = []; for (const half of [r.below, r.above]) for (const comp of components(half)) if (comp.T.length >= 12) comps.push(comp);
+      let bad = comps.filter(m => tinyPiece(m, settings, c.n)).length;
+      if (bad) {
+        // try again leaving the small islands of this section uncut
+        for (const f of [0.3, 0.12]) {
+          const r2 = cutMesh(pc.mesh, { n: c.n, d: c.d }, { cutId: id, connector: conn, label: settings.label, wall: settings.wall, minIslandFrac: f });
+          if (r2.error) continue;
+          const c2 = []; for (const half of [r2.below, r2.above]) for (const comp of components(half)) if (comp.T.length >= 12) c2.push(comp);
+          if (c2.length < 2) continue;
+          const b2 = c2.filter(m => tinyPiece(m, settings, c.n)).length;
+          if (b2 < bad) { bad = b2; r = r2; comps.length = 0; comps.push(...c2); }
+          if (!bad) break;
+        }
       }
+      if (bad) { if (!fallback || bad < fallback.bad) fallback = { c, r, comps, bad }; continue; }
+      take(c, r, comps); ok = true; break;
+    }
+    if (!ok && fallback) { take(fallback.c, fallback.r, fallback.comps); ok = true; }
+    function take(c, r, comps) {
+      const id = cutCounter + 1;
+      if (settings.onCut) settings.onCut(pc.mesh, c, r);
+      cutCounter = id; reports.push(r.report);
+      const av = (pc.avoid || []).concat([{ axis: c.axis, d: r.report.d, r: avoidR }]);
+      for (const comp of comps) queue.push({ mesh: comp, avoid: av });
       if (progress) progress({ cuts: cutCounter, pieces: done.length + queue.length });
-      break;
     }
     if (!ok) { notes.push('One piece could not be cut automatically and may not fit the bed.'); done.push(pc); }
   }
@@ -1262,35 +1293,163 @@ function nearestInGrid(grid, P, p) {
   }
   return { i: best, d: best < 0 ? cell * 4 : Math.sqrt(bd) };
 }
-function proposeGuidedCuts(original, segParts) {
+// Detail levels, like Tripo's segmentation: how many parts, and how small a part may be
+const DETAIL = {
+  simple:   { maxParts: 5,  minFrac: 0.04,  pieceFrac: 0.012, joints: 5 },
+  balanced: { maxParts: 15, minFrac: 0.012, pieceFrac: 0.004, joints: 14 },
+  detailed: { maxParts: 40, minFrac: 0.003, pieceFrac: 0.0015, joints: 40 },
+};
+function detailOf(level) { return DETAIL[level] || DETAIL.balanced; }
+
+// per-vertex part labels of the merged model (from the AI parts)
+function labelFromParts(original, segParts) {
   const al = alignSegmentation(original, segParts);
-  if (!al) return { error: 'Could not line the segmented model up with your file.' };
+  if (!al) return null;
   const ob = bbox(original);
   const grid = buildGrid(al.P, len(ob.size) / 60);
   const nv = original.P.length / 3, lab = new Int32Array(nv);
   for (let i = 0; i < nv; i++) { const q = nearestInGrid(grid, al.P, [original.P[i * 3], original.P[i * 3 + 1], original.P[i * 3 + 2]]); lab[i] = q.i >= 0 ? al.labels[q.i] : -1; }
-  const groups = new Map(); const T = original.T;
-  for (let t = 0; t < T.length; t += 3) for (let k = 0; k < 3; k++) {
-    const a = T[t + k], b = T[t + (k + 1) % 3];
-    if (lab[a] === lab[b] || lab[a] < 0 || lab[b] < 0) continue;
-    const key = Math.min(lab[a], lab[b]) + '-' + Math.max(lab[a], lab[b]);
-    let l = groups.get(key); if (!l) { l = []; groups.set(key, l); }
-    l.push([(original.P[a * 3] + original.P[b * 3]) / 2, (original.P[a * 3 + 1] + original.P[b * 3 + 1]) / 2, (original.P[a * 3 + 2] + original.P[b * 3 + 2]) / 2]);
+  // vertices with no part nearby (sparse part meshes) take the label spreading in from their neighbours
+  let left = 0; for (let i = 0; i < nv; i++) if (lab[i] < 0) left++;
+  if (left && left < nv) {
+    const T = original.T, nb = Array.from({ length: nv }, () => []);
+    for (let t = 0; t < T.length; t += 3) for (let k = 0; k < 3; k++) { const a = T[t + k], b = T[t + (k + 1) % 3]; nb[a].push(b); nb[b].push(a); }
+    let front = []; for (let i = 0; i < nv; i++) if (lab[i] >= 0 && nb[i].some(j => lab[j] < 0)) front.push(i);
+    while (front.length) { const nx = []; for (const i of front) for (const j of nb[i]) if (lab[j] < 0) { lab[j] = lab[i]; nx.push(j); } front = nx; }
+  }
+  return lab;
+}
+
+/*
+ mergeRegions: turns noisy AI labels into a few clean parts.
+ Each connected patch of same-label triangles is a region. The smallest region is merged into the
+ neighbour it shares the longest border with, until every region is at least minFrac of the surface
+ and there are at most maxParts. Returns region id per triangle and region info.
+*/
+function mergeRegions(mesh, vlab, names, opts) {
+  const P = mesh.P, T = mesh.T, nt = T.length / 3, nv = P.length / 3;
+  const tl = new Int32Array(nt), area = new Float64Array(nt);
+  for (let t = 0; t < nt; t++) {
+    const a = vlab[T[t * 3]], b = vlab[T[t * 3 + 1]], c = vlab[T[t * 3 + 2]];
+    tl[t] = (a === b || a === c) ? a : (b === c ? b : a);
+    const A = T[t * 3] * 3, B = T[t * 3 + 1] * 3, C = T[t * 3 + 2] * 3;
+    const u = [P[B] - P[A], P[B + 1] - P[A + 1], P[B + 2] - P[A + 2]], v = [P[C] - P[A], P[C + 1] - P[A + 1], P[C + 2] - P[A + 2]];
+    area[t] = len(cross(u, v)) / 2;
+  }
+  // triangle adjacency over shared edges
+  const edge = new Map(), adjT = [];
+  for (let t = 0; t < nt; t++) for (let k = 0; k < 3; k++) {
+    const a = T[t * 3 + k], b = T[t * 3 + (k + 1) % 3];
+    const key = a < b ? a * nv + b : b * nv + a;
+    const o = edge.get(key);
+    if (o === undefined) edge.set(key, t);
+    else { const L = Math.hypot(P[a * 3] - P[b * 3], P[a * 3 + 1] - P[b * 3 + 1], P[a * 3 + 2] - P[b * 3 + 2]); adjT.push(o, t, L); }
+  }
+  // patches: same label, connected
+  const patch = new Int32Array(nt).fill(-1); let np = 0;
+  const nb = Array.from({ length: nt }, () => []);
+  for (let i = 0; i < adjT.length; i += 3) { nb[adjT[i]].push(adjT[i + 1]); nb[adjT[i + 1]].push(adjT[i]); }
+  const pLab = [], pArea = [];
+  for (let t = 0; t < nt; t++) {
+    if (patch[t] >= 0) continue;
+    const id = np++; let ar = 0; const st = [t]; patch[t] = id;
+    while (st.length) { const x = st.pop(); ar += area[x]; for (const y of nb[x]) if (patch[y] < 0 && tl[y] === tl[t]) { patch[y] = id; st.push(y); } }
+    pLab.push(tl[t]); pArea.push(ar);
+  }
+  // patch adjacency (shared border length)
+  const adj = Array.from({ length: np }, () => new Map());
+  for (let i = 0; i < adjT.length; i += 3) {
+    const p = patch[adjT[i]], q = patch[adjT[i + 1]]; if (p === q) continue;
+    adj[p].set(q, (adj[p].get(q) || 0) + adjT[i + 2]); adj[q].set(p, (adj[q].get(p) || 0) + adjT[i + 2]);
+  }
+  const total = pArea.reduce((s, v) => s + v, 0) || 1;
+  const minA = total * opts.minFrac;
+  const parent = new Int32Array(np); for (let i = 0; i < np; i++) parent[i] = i;
+  const find = x => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  const alive = new Set(); for (let i = 0; i < np; i++) alive.add(i);
+  const big = new Map(); // region -> {label: area} to name it after its largest original part
+  for (let i = 0; i < np; i++) big.set(i, { [pLab[i]]: pArea[i] });
+  // simple binary heap on area
+  const heap = []; const hp = (a, i) => { heap.push([a, i]); let k = heap.length - 1; while (k > 0) { const pa = (k - 1) >> 1; if (heap[pa][0] <= heap[k][0]) break; [heap[pa], heap[k]] = [heap[k], heap[pa]]; k = pa; } };
+  const hpop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let k = 0; for (;;) { const l = 2 * k + 1, r = l + 1; let m = k; if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === k) break; [heap[m], heap[k]] = [heap[k], heap[m]]; k = m; } } return top; };
+  for (let i = 0; i < np; i++) hp(pArea[i], i);
+  const curA = pArea.slice();
+  while (heap.length) {
+    const [a, i] = hpop();
+    if (!alive.has(i) || a !== curA[i]) continue;
+    if (a >= minA && alive.size <= opts.maxParts) break;
+    if (!adj[i].size) { if (a >= minA || alive.size <= opts.maxParts) continue; else continue; }
+    let j = -1, bl = -1; for (const [q, L] of adj[i]) if (L > bl) { bl = L; j = q; }
+    // merge i into j
+    parent[i] = j; alive.delete(i); curA[j] += a;
+    const bj = big.get(j); for (const [k, v] of Object.entries(big.get(i))) bj[k] = (bj[k] || 0) + v; big.delete(i);
+    for (const [q, L] of adj[i]) { if (q === j) { adj[j].delete(i); continue; } adj[q].delete(i); adj[q].set(j, (adj[q].get(j) || 0) + L); adj[j].set(q, (adj[j].get(q) || 0) + L); }
+    adj[i].clear();
+    hp(curA[j], j);
+  }
+  const ids = [...alive].sort((x, y) => curA[y] - curA[x]), remap = new Map(); ids.forEach((r, k) => remap.set(r, k));
+  const tri = new Int32Array(nt); for (let t = 0; t < nt; t++) tri[t] = remap.get(find(patch[t]));
+  const used = new Map();
+  const regions = ids.map((r, k) => {
+    const lb = big.get(r); let bestL = -1, bv = -1; for (const [l, v] of Object.entries(lb)) if (v > bv) { bv = v; bestL = +l; }
+    let name = (names && names[bestL]) || '';
+    if (!name || /^(part|mesh|geometry|node|object|segment|tripo_part)[\s_-]*\d*$/i.test(name.trim())) name = 'part ' + (k + 1);
+    const n = (used.get(name) || 0) + 1; used.set(name, n); if (n > 1) name += ' ' + n;
+    return { name, area: curA[r], frac: curA[r] / total };
+  });
+  return { tri, regions };
+}
+
+// joint planes between regions (tri = region id per triangle)
+function cutsFromRegions(mesh, tri, regions) {
+  const P = mesh.P, T = mesh.T, nv = P.length / 3, ob = bbox(mesh);
+  const edge = new Map(), groups = new Map();
+  for (let t = 0; t < T.length / 3; t++) for (let k = 0; k < 3; k++) {
+    const a = T[t * 3 + k], b = T[t * 3 + (k + 1) % 3];
+    const key = a < b ? a * nv + b : b * nv + a;
+    const o = edge.get(key);
+    if (o === undefined) { edge.set(key, t); continue; }
+    const i = tri[o], j = tri[t]; if (i === j) continue;
+    const gk = Math.min(i, j) + '-' + Math.max(i, j);
+    let l = groups.get(gk); if (!l) { l = []; groups.set(gk, l); }
+    l.push([(P[a * 3] + P[b * 3]) / 2, (P[a * 3 + 1] + P[b * 3 + 1]) / 2, (P[a * 3 + 2] + P[b * 3 + 2]) / 2]);
   }
   const cuts = [];
   for (const [key, pts] of groups) {
-    if (pts.length < 10) continue;
+    if (pts.length < 8) continue;
     const { c, n } = fitPlane(pts);
     const [i, j] = key.split('-').map(Number);
-    // spots: boundary points near the plane, thinned, so separate contact areas of one joint are all known
     const spots = []; const dmax = len(ob.size) * 0.004;
     const near = pts.filter(p => Math.abs(dot(n, p) - dot(n, c)) <= Math.max(dmax * 6, 1e-9));
     const step = Math.max(1, Math.floor(near.length / 40));
     for (let k = 0; k < near.length; k += step) spots.push(near[k]);
-    cuts.push({ key, a: segParts[i].name || 'part ' + (i + 1), b: segParts[j].name || 'part ' + (j + 1), c, n, d: dot(n, c), size: pts.length, spots });
+    // radius of the joint, for the ring in the 3D view
+    let r = 0; for (const p of pts) r = Math.max(r, len(sub(sub(p, c), mul(n, dot(sub(p, c), n)))));
+    cuts.push({ key, a: regions[i].name, b: regions[j].name, c, n, d: dot(n, c), size: pts.length, r, spots });
   }
   cuts.sort((x, y) => y.size - x.size);
-  return { cuts, labels: lab };
+  return cuts;
+}
+
+function proposeGuidedCuts(original, segParts, opts = {}) {
+  const lab = labelFromParts(original, segParts);
+  if (!lab) return { error: 'Could not line the segmented model up with your file.' };
+  const names = segParts.map((p, i) => p.name || 'part ' + (i + 1));
+  const det = detailOf(opts.level || 'detailed');
+  const { tri, regions } = mergeRegions(original, lab, names, det);
+  return { cuts: cutsFromRegions(original, tri, regions), labels: lab, tri, regions };
+}
+
+// a piece is too small to print well: tiny volume, or a thin sliver along the cut
+function tinyPiece(m, settings, n) {
+  const minVol = settings.minPieceVol || 0, minThick = settings.minThick || 0;
+  if (minVol && Math.abs(volume(m)) < minVol) return true;
+  if (minThick && n) {
+    let lo = Infinity, hi = -Infinity; const P = m.P;
+    for (let i = 0; i < P.length; i += 3) { const d = P[i] * n[0] + P[i + 1] * n[1] + P[i + 2] * n[2]; if (d < lo) lo = d; if (d > hi) hi = d; }
+    if (hi - lo < minThick) return true;
+  }
+  return false;
 }
 
 function applyGuidedCuts(pieces, cuts, settings) {
@@ -1313,9 +1472,11 @@ function applyGuidedCuts(pieces, cuts, settings) {
       r = cutMesh(list[bestI].mesh, { n: c.n, d: c.d }, { ...base, localSpots: c.spots, localTol: len(b.size) * 0.01 });
     }
     if (r.error) { notes.push(`Skipped ${c.a} / ${c.b}: ${r.error}`); continue; }
+    const comps = []; for (const half of [r.below, r.above]) for (const comp of components(half)) if (comp.T.length >= 12) comps.push(comp);
+    if (comps.some(m => tinyPiece(m, settings, c.n))) { notes.push(`Kept ${c.a} / ${c.b} together: the cut would leave a piece too small to print.`); continue; }
     cutId++; r.report.joint = c.a + ' / ' + c.b; reports.push(r.report);
     const rest = list.filter((_, i) => i !== bestI);
-    for (const half of [r.below, r.above]) for (const comp of components(half)) if (comp.T.length >= 12) rest.push({ mesh: comp, avoid: [] });
+    for (const comp of comps) rest.push({ mesh: comp, avoid: [] });
     list = rest;
   }
   return { pieces: list, reports, notes, lastCutId: cutId };
@@ -1899,7 +2060,7 @@ function renderData(m) {
 const api = {
   makeMesh, bbox, volume, weldSoup, weldIndexed, subMesh, translateMesh, scaleMesh, rotateMesh, mergeMeshes, components, edgeStats, orientMesh, fillHoles,
   basisFor, fitPlane, earcut, loopArea, pointInLoops, distToLoops, poleOfInaccessibility, sectionLoops, groupIslands, sectionAreas,
-  cutMesh, fitsBed, layFlat, rotationTo, voxelUnion, taubin, findBodyJoints, solidGrid, chooseCut, autoSplit, proposeGuidedCuts, applyGuidedCuts, assemblyMap, cylinderMesh, dowelMesh,
+  cutMesh, fitsBed, layFlat, rotationTo, voxelUnion, taubin, findBodyJoints, solidGrid, chooseCut, autoSplit, proposeGuidedCuts, applyGuidedCuts, DETAIL, detailOf, labelFromParts, mergeRegions, cutsFromRegions, tinyPiece, assemblyMap, cylinderMesh, dowelMesh,
   parseSTL, parseOBJ, parseGLB, stlBinary, threeMF, zipStore, crc32, renderData, textDots,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Seam = api;

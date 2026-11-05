@@ -157,6 +157,32 @@ console.log('joint attached at two spots (handle)');
   ok(g.pieces.length === 2 && g.notes.length === 0 && g.pieces.every(p => S.edgeStats(p.mesh).watertight), 'handle cut free at both spots: ' + g.pieces.length + ' pieces ' + g.notes.join(' '));
 }
 
+console.log('detail levels merge small AI parts');
+{
+  const R = 100, sph = (r, c) => S.translateMesh(sh.revolve(sh.sphereProfile(r, 0, 24), 32), c);
+  const parts = [{ name: 'torso', mesh: sph(R, [0, 0, 0]) }, { name: 'head', mesh: sph(60, [0, 0, 140]) }];
+  // 12 small bumps (noise parts, like PartPacker's tiny pieces)
+  for (let k = 0; k < 12; k++) { const a = k / 12 * Math.PI * 2; parts.push({ name: 'bump ' + k, mesh: sph(14, [Math.cos(a) * 98, Math.sin(a) * 98, -20]) }); }
+  const u = S.voxelUnion(parts.map(p => p.mesh), 140, 4).mesh;
+  const counts = {};
+  for (const level of ['simple', 'balanced', 'detailed']) counts[level] = S.proposeGuidedCuts(u, parts, { level }).regions.length;
+  ok(counts.simple <= 5 && counts.simple >= 2 && counts.balanced <= 15 && counts.detailed >= counts.balanced, 'regions simple/balanced/detailed: ' + JSON.stringify(counts));
+  const p = S.proposeGuidedCuts(u, parts, { level: 'simple' });
+  const vol = Math.abs(S.volume(u));
+  const g = S.applyGuidedCuts([{ mesh: u }], p.cuts, { connector: { type: 'none' }, label: false, minPieceVol: vol * 0.012, minThick: 6 });
+  ok(g.pieces.length >= 2 && g.pieces.every(x => Math.abs(S.volume(x.mesh)) >= vol * 0.012), 'simple split: ' + g.pieces.length + ' pieces, none tiny');
+}
+
+console.log('bed split avoids tiny pieces');
+{
+  // a long bar with a thin neck close to one end: the narrowest point would leave a stub
+  const prof = [[0, 0], [30, 0.01], [30, 20], [8, 24], [30, 28], [30, 400], [0, 400.01]];
+  const m = sh.revolve(prof, 32);
+  const vol = Math.abs(S.volume(m));
+  const r = S.autoSplit([{ mesh: m }], { bed: [250, 250, 250], margin: 0, connector: { type: 'none' }, label: false, minPieceVol: vol * 0.08, minThick: 8 });
+  ok(r.pieces.every(x => Math.abs(S.volume(x.mesh)) >= vol * 0.08), 'pieces ' + r.pieces.map(x => (Math.abs(S.volume(x.mesh)) / vol * 100).toFixed(0) + '%').join(' '));
+}
+
 console.log('built-in body joints (humanoid, no AI)');
 {
   const { human, chibi } = require('./human.js');

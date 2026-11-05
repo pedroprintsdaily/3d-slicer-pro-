@@ -58,6 +58,11 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.wide { width: 100%; height: 42px; }
 .stagebtns button { height: 32px; padding: 0 10px; background: color-mix(in srgb, var(--panel) 85%, transparent); font-size: 12.5px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.seglist { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; max-height: 180px; overflow: auto; }
+.segrow { display: flex; align-items: center; gap: 7px; font-size: 13px; min-width: 0; }
+.segrow i { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+.segrow span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.segrow small { opacity: .6; }
 .chip { position: relative; }
 .chip input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
 .chip span { display: block; padding: 7px 12px; border: 1px solid var(--line); border-radius: 999px; font-size: 13px; background: var(--bg); }
@@ -248,11 +253,16 @@ details[open] summary { margin-bottom: 10px; }
       <label class="check"><input id="labels" type="checkbox" checked><span>Engrave cut numbers on both faces so matching pieces are easy to find</span></label>
 
       <div class="field" id="bodyBox">
-        <span>Body-part cuts</span>
-        <p class="hint" id="jointsHint">Seamline finds where the head, arms, legs and tail join the body and cuts there first. Works on any STL, no AI key needed.</p>
+        <span>Part detail</span>
+        <div class="chips" id="detailChips">
+          <label class="chip"><input type="radio" name="detail" value="simple" checked><span>Simple · 3–5 parts</span></label>
+          <label class="chip"><input type="radio" name="detail" value="balanced"><span>Balanced · 6–15</span></label>
+          <label class="chip"><input type="radio" name="detail" value="detailed"><span>Detailed · 15+</span></label>
+        </div>
+        <p class="hint" id="jointsHint">Seamline finds where the head, arms, legs and tail join the body and cuts there first. Works on any STL, no AI key needed. Small bits are merged into their neighbour, and no cut may leave a piece too small to print.</p>
+        <div class="seglist" id="segList" hidden></div>
         <div class="row">
           <button id="bodyGo">Find body joints</button>
-          <label class="check"><input id="bodySecondary" type="checkbox"><span>Also elbows and knees</span></label>
         </div>
         <div class="joints" id="joints"></div>
       </div>
@@ -263,7 +273,6 @@ details[open] summary { margin-bottom: 10px; }
         <div id="aiOn" hidden style="display:grid; gap:10px">
           <p class="hint">Tripo labels body parts and armor plates with AI (uses your Tripo key). Its joints replace the built-in ones.</p>
           <div class="grid2">
-            <label class="field"><span>Detail</span><select id="gran"><option value="simple">Few parts</option><option value="balanced" selected>Balanced</option><option value="detailed">Many parts</option></select></label>
             <div class="field"><span>&nbsp;</span><button id="tripoGo">Find joints with Tripo</button></div>
           </div>
           <hr style="border:0;border-top:1px solid var(--line);width:100%">
@@ -377,6 +386,7 @@ function applyResult(r) {
   if (S.sel >= S.pieces.length) S.sel = -1;
   viewer.setPieces(S.pieces, S.colors);
   renderParts(r); refreshFit();
+  if (S.pieces.length === 1 && S.seg) showSegments(); else $('segList').hidden = true;
 }
 function renderModel(r) {
   S.info = r.info; S.baseSize = r.info.size;
@@ -494,12 +504,12 @@ function settings() {
   return {
     bed: bed(), margin: +$('margin').value || 0, mode: document.querySelector('input[name=cutmode]:checked').value,
     connector: { type: $('ctype').value, diameter: +$('cdia').value, depth: +$('cdep').value, tolerance: +$('tol').value || 0, magnetD: md, magnetH: mh },
-    label: $('labels').checked, wall: 1.6,
+    label: $('labels').checked, wall: 1.6, level: level(),
   };
 }
 $('splitGo').onclick = () => busy('Finding the best cuts…', async () => {
   const guided = S.guided.filter(g => g.on).map(g => ({ a: g.a, b: g.b, c: g.c, n: g.n, d: g.d, spots: g.spots }));
-  const r = await call('split', { settings: settings(), guided });
+  const r = await call('split', { settings: settings(), guided }); S.split = true; $('segList').hidden = true;
   S.sel = -1; applyResult(r); setStatus(`Split into ${r.pieces.length} pieces`, false);
   if (S.explode === 0) { $('explode').value = 35; viewer.setExplode(0.35); S.explode = 0.35; }
 });
@@ -519,7 +529,7 @@ $('manual').addEventListener('toggle', () => { if ($('manual').open) updateManua
 $('manualGo').onclick = () => {
   if (S.sel < 0) { setStatus('Tap a piece first.', false, true); return; }
   const ax = +document.querySelector('input[name=maxis]:checked').value, pos = updateManual();
-  busy('Cutting…', async () => { const r = await call('cutPart', { index: S.sel, axis: ax, pos, settings: settings() }); S.sel = -1; applyResult(r); viewer.setPlane(null); setStatus('Cut made', false); });
+  busy('Cutting…', async () => { const r = await call('cutPart', { index: S.sel, axis: ax, pos, settings: settings() }); S.sel = -1; S.split = true; $('segList').hidden = true; applyResult(r); viewer.setPlane(null); setStatus('Cut made', false); });
 };
 $('explode').addEventListener('input', () => { S.explode = +$('explode').value / 100; viewer.setExplode(S.explode); });
 
@@ -530,9 +540,9 @@ async function loadFile(f) {
   const buf = await f.arrayBuffer();
   await busy(`Reading ${f.name}…`, async () => {
     const r = await call('load', { name: f.name, buf }, [buf]);
-    S.colors = []; S.sel = -1; S.guided = []; renderJoints();
+    S.colors = []; S.sel = -1; S.guided = []; S.seg = false; S.split = false; $('segList').hidden = true; renderJoints();
     renderModel(r); applyResult(r); viewer.fit();
-    if (r.info.watertight && r.parts === 1) { setStatus('Finding body joints…', true); await findBody(true); }
+    if (r.info.watertight && r.parts === 1) { setStatus('Finding body joints…', true); await findBody(true); await showSegments(); }
     setStatus(r.info.watertight ? 'Model loaded' : 'Loaded. The mesh has holes: tap Repair before splitting.', false, !r.info.watertight);
     if (r.info.size.every(v => v < 8)) setStatus('This model is tiny. Its file units may be meters or inches: set File units in step 2.', false, true);
   });
@@ -545,7 +555,7 @@ drop.addEventListener('drop', e => loadFile(e.dataTransfer.files[0]));
 document.querySelector('.stage').addEventListener('dragover', e => e.preventDefault());
 document.querySelector('.stage').addEventListener('drop', e => { e.preventDefault(); loadFile(e.dataTransfer.files[0]); });
 $('repair').onclick = () => busy('Repairing holes…', async () => { const r = await call('repair'); renderModel({ ...r, name: $('modelStats').querySelector('b')?.textContent, parts: 1 }); applyResult(r); setStatus(`Filled ${r.filled} hole${r.filled === 1 ? '' : 's'}`, false); });
-$('loadSample').onclick = () => busy('Loading sample…', async () => { const r = await call('sample'); S.colors = []; renderModel(r); applyResult(r); viewer.fit(); });
+$('loadSample').onclick = () => busy('Loading sample…', async () => { const r = await call('sample'); S.colors = []; S.seg = false; S.guided = []; renderJoints(); $('segList').hidden = true; renderModel(r); applyResult(r); viewer.fit(); });
 
 // ------------------------------------------------------------------ export
 $('exportGo').onclick = () => busy('Packing the print kit…', async () => {
@@ -588,11 +598,11 @@ async function poll(path, label) {
 async function fetchResult(url) { const r = await api('/api/fetch?url=' + encodeURIComponent(url)); return r.arrayBuffer(); }
 $('tripoGo').onclick = () => busy('Uploading to Tripo…', async () => {
   const stl = await call('wholeSTL');
-  const task = await api(`/api/tripo/segment?filename=model.stl&granularity=${$('gran').value}`, { method: 'POST', body: stl.stl });
+  const task = await api(`/api/tripo/segment?filename=model.stl&granularity=${level()}`, { method: 'POST', body: stl.stl });
   const done = await poll('/api/tripo/task/' + task.task_id, 'Tripo is labeling parts');
   setStatus('Reading Tripo parts…', true);
   const buf = await fetchResult(done.model_url);
-  const g = await call('guided', { buf }, [buf]);
+  const g = await call('guided', { buf, level: level() }, [buf]);
   S.guided = g.cuts.map(c => ({ ...c, on: true })); renderJoints();
   setStatus(`Tripo found ${g.cuts.length} joints. Untick any you don't want, then Split.`, false);
 });
@@ -601,7 +611,7 @@ function renderJoints() {
   S.guided.forEach((g, i) => {
     const l = document.createElement('label'); l.className = 'check';
     l.innerHTML = `<input type="checkbox" id="j${i}"><span></span>`;
-    l.querySelector('input').checked = g.on; l.querySelector('input').onchange = e => { g.on = e.target.checked; showRings(i); };
+    l.querySelector('input').checked = g.on; l.querySelector('input').onchange = e => { g.on = e.target.checked; showRings(i); if (S.pieces.length === 1) busy('Updating parts…', showSegments); };
     l.querySelector('span').textContent = `${g.a} / ${g.b}`; box.appendChild(l);
     l.addEventListener('mouseenter', () => showRings(i)); l.addEventListener('click', e => { if (e.target.tagName !== 'INPUT') showRings(i); });
   });
@@ -618,7 +628,7 @@ async function showRings(active) {
 }
 // ---------------------------------------------------------------- built-in body joints
 async function findBody(auto) {
-  const r = await call('bodyJoints', { secondary: $('bodySecondary').checked });
+  const r = await call('bodyJoints', { level: level() });
   S.guided = r.cuts.map(c => ({ ...c, on: true })); renderJoints();
   $('jointsHint').textContent = S.guided.length
     ? `Found ${S.guided.length} joint${S.guided.length > 1 ? 's' : ''}. Untick any you don't want, then Split. Cut faces get connectors and numbers like any other cut.`
@@ -626,8 +636,35 @@ async function findBody(auto) {
   if (!auto) setStatus(S.guided.length ? `Found ${S.guided.length} body joints` : 'No body joints found', false);
   return S.guided.length;
 }
-$('bodyGo').onclick = () => busy('Finding body joints…', () => findBody(false));
-$('bodySecondary').onchange = () => { if (S.pieces.length) busy('Finding body joints…', () => findBody(false)); };
+$('bodyGo').onclick = () => busy('Finding body joints…', async () => { await findBody(false); await showSegments(); });
+function level() { return document.querySelector('input[name=detail]:checked').value; }
+document.querySelectorAll('input[name=detail]').forEach(el => el.addEventListener('change', () => {
+  if (!S.pieces.length) return;
+  if (S.seg) busy('Grouping parts…', async () => { const r = await call('regroup', { level: level() }); S.guided = r.cuts.map(c => ({ ...c, on: true })); renderJoints(); await showSegments(); });
+  else busy('Finding body joints…', async () => { await findBody(false); await showSegments(); });
+}));
+// colored parts before splitting (like Tripo's part list): AI parts, or the anatomy cuts on any model
+let segSeq = 0;
+async function showSegments() {
+  const box = $('segList'), seq = ++segSeq;
+  const on = S.guided.filter(g => g.on);
+  if (S.pieces.length !== 1 || (!S.seg && !on.length)) { box.hidden = true; return; }
+  const r = await call('segPreview', { cuts: on.map(g => ({ a: g.a, b: g.b, c: g.c, n: g.n, d: g.d, spots: g.spots })) });
+  if (seq !== segSeq || S.pieces.length !== 1) return;
+  box.innerHTML = '';
+  if (!r.regions.length) { box.hidden = true; viewer.setPieces(S.pieces, S.colors); return; }
+  const cols = r.regions.map((_, i) => PALETTE[i % PALETTE.length]);
+  viewer.setPieces(r.regions, cols); showRings(-1);
+  r.regions.forEach((g, i) => {
+    const d = document.createElement('div'); d.className = 'segrow';
+    d.innerHTML = '<i></i><span></span><small></small>';
+    d.querySelector('i').style.background = cols[i]; d.querySelector('span').textContent = g.name; d.querySelector('small').textContent = g.frac >= 0.005 ? Math.round(g.frac * 100) + '%' : '<1%';
+    box.appendChild(d);
+  });
+  box.hidden = false;
+  $('jointsHint').textContent = `${r.regions.length} parts from ${on.length} joint cut${on.length === 1 ? '' : 's'}. Untick a joint to keep those parts together, or pick another detail level. Split then fits each part to your bed.`;
+}
+
 
 // ---------------------------------------------------------------- picture -> 3D
 document.querySelectorAll('input[name=src]').forEach(r => r.addEventListener('change', () => {
@@ -694,11 +731,12 @@ $('picGo').onclick = () => {
     const base = picFile.name.replace(/\.[^.]+$/, '');
     let r;
     if (j.kind === 'split') r = await call('load', { name: base + '.glb', buf }, [buf]);
-    else r = await call('loadParts', { name: base, buf, res: +$('mergeRes').value }, [buf]);
+    else r = await call('loadParts', { name: base, buf, res: +$('mergeRes').value, level: level() }, [buf]);
     S.colors = []; S.sel = -1; S.guided = (r.cuts || []).map(c => ({ ...c, on: true })); renderJoints();
+    S.seg = (r.regions || []).length > 1; S.split = false;
     renderModel({ ...r, parts: j.kind === 'split' ? r.parts : 1 }); applyResult(r); viewer.fit();
-    if (S.guided.length) $('jointsHint').textContent = `${S.guided.length} joints from the AI parts. Untick any you don't want cut.`;
-    else if (j.kind !== 'split') await findBody(true);
+    if (S.seg) await showSegments();
+    else if (j.kind !== 'split') { await findBody(true); await showSegments(); }
     const where = S.guided.length ? ` with ${S.guided.length} joint cut${S.guided.length > 1 ? "s" : ""} ready` : j.kind === 'split' ? ` in ${r.parts} Meshy parts` : '';
     setStatus(`3D model ready${where}. Set its real size in step 02, then Split.`, false);
   });

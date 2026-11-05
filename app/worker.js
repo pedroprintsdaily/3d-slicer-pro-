@@ -158,6 +158,10 @@ const handlers = {
     if (r.error) throw new Error(r.error);
     return { cuts: r.cuts.map(c => cutToBase({ a: c.a, b: c.b, c: c.c, n: c.n, d: c.d, size: c.size, spots: c.spots })), partNames: parts.map(p => p.name) };
   },
+  bodyJoints({ secondary }) {
+    const r = Seam.findBodyJoints(W.current, { res: 96, secondary: !!secondary });
+    return { cuts: r.cuts.map(c => cutToBase(c)), note: r.note };
+  },
   wholeSTL() {
     const m = W.current;
     return { stl: Seam.stlBinary(m, W.name).buffer };

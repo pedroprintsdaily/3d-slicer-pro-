@@ -122,7 +122,21 @@ details[open] summary { margin-bottom: 10px; }
     <!-- 1 -->
     <div class="step">
       <h2><i>01</i>Model</h2>
-      <label class="field" id="tokenF" hidden><span>Server app token</span><input id="token" type="password" autocomplete="off" placeholder="APP_TOKEN from your server"></label>
+      <div id="tokenF" hidden style="display:grid; gap:10px">
+        <label class="field"><span>Server app token</span><input id="token" type="password" autocomplete="off" placeholder="APP_TOKEN from your server"></label>
+        <details id="keysBox">
+          <summary>AI keys <span class="tag" id="keysState"></span></summary>
+          <div style="display:grid; gap:10px">
+            <p class="hint">Saved only in this browser and sent only to your own Seamline server. Each one turns on an AI model below.</p>
+            <label class="field"><span>Hugging Face token (free) for PartPacker</span><input id="kHf" type="password" autocomplete="off" placeholder="hf_…"></label>
+            <p class="hint">Get one at huggingface.co → Settings → Access Tokens → Create new token (Read). Free accounts include daily GPU time.</p>
+            <label class="field"><span>Tripo API key</span><input id="kTripo" type="password" autocomplete="off" placeholder="tsk_…"></label>
+            <p class="hint">platform.tripo3d.ai → API Keys. Uses Tripo credits.</p>
+            <label class="field"><span>Meshy API key</span><input id="kMeshy" type="password" autocomplete="off" placeholder="msy_…"></label>
+            <p class="hint">meshy.ai → Settings → API. Uses Meshy credits.</p>
+          </div>
+        </details>
+      </div>
       <div class="chips" role="radiogroup" aria-label="Start from">
         <label class="chip"><input type="radio" name="src" value="file" checked><span>From a 3D file</span></label>
         <label class="chip"><input type="radio" name="src" value="pic"><span>From a picture</span></label>
@@ -233,17 +247,25 @@ details[open] summary { margin-bottom: 10px; }
       </div>
       <label class="check"><input id="labels" type="checkbox" checked><span>Engrave cut numbers on both faces so matching pieces are easy to find</span></label>
 
+      <div class="field" id="bodyBox">
+        <span>Body-part cuts</span>
+        <p class="hint" id="jointsHint">Seamline finds where the head, arms, legs and tail join the body and cuts there first. Works on any STL, no AI key needed.</p>
+        <div class="row">
+          <button id="bodyGo">Find body joints</button>
+          <label class="check"><input id="bodySecondary" type="checkbox"><span>Also elbows and knees</span></label>
+        </div>
+        <div class="joints" id="joints"></div>
+      </div>
+
       <details id="aiBox">
-        <summary>AI anatomical cuts (Tripo) and Meshy split</summary>
-        <div id="aiOff" class="note">AI tools run when Seamline is opened from your own Seamline server, which holds your Tripo and Meshy keys. The download kit includes the server and a 5-minute Railway setup guide.</div>
+        <summary>More AI tools: Tripo body labels, Meshy split</summary>
+        <div id="aiOff" class="note">These run when Seamline is opened from your Seamline server (seamline-app-production.up.railway.app). The built-in body-part cuts above work everywhere.</div>
         <div id="aiOn" hidden style="display:grid; gap:10px">
-          <p class="hint" id="jointsHint">Joints from an AI model built in parts show up here automatically.</p>
-          <p class="hint">Tripo labels body parts (head, arms, legs, armor plates). Seamline turns each boundary into a flat cut with connectors, then fits the rest to your bed.</p>
+          <p class="hint">Tripo labels body parts and armor plates with AI (uses your Tripo key). Its joints replace the built-in ones.</p>
           <div class="grid2">
             <label class="field"><span>Detail</span><select id="gran"><option value="simple">Few parts</option><option value="balanced" selected>Balanced</option><option value="detailed">Many parts</option></select></label>
             <div class="field"><span>&nbsp;</span><button id="tripoGo">Find joints with Tripo</button></div>
           </div>
-          <div class="joints" id="joints"></div>
           <hr style="border:0;border-top:1px solid var(--line);width:100%">
           <p class="hint">Made the model in Meshy? Paste its task ID to have Meshy split it, then fit and label it here.</p>
           <label class="field"><span>Meshy task ID</span><input id="meshyId" type="text" placeholder="018a210d-…"></label>
@@ -510,6 +532,7 @@ async function loadFile(f) {
     const r = await call('load', { name: f.name, buf }, [buf]);
     S.colors = []; S.sel = -1; S.guided = []; renderJoints();
     renderModel(r); applyResult(r); viewer.fit();
+    if (r.info.watertight && r.parts === 1) { setStatus('Finding body joints…', true); await findBody(true); }
     setStatus(r.info.watertight ? 'Model loaded' : 'Loaded. The mesh has holes: tap Repair before splitting.', false, !r.info.watertight);
     if (r.info.size.every(v => v < 8)) setStatus('This model is tiny. Its file units may be meters or inches: set File units in step 2.', false, true);
   });
@@ -540,14 +563,15 @@ $('exportGo').onclick = () => busy('Packing the print kit…', async () => {
 });
 
 // ------------------------------------------------------------------ AI (only when served by a Seamline server)
-const api = (path, opts = {}) => fetch(path, { ...opts, headers: { ...(opts.headers || {}), 'X-App-Token': $('token').value } }).then(async r => { const j = r.headers.get('content-type')?.includes('json') ? await r.json() : null; if (!r.ok) throw new Error(j && j.error || r.statusText); return j || r; });
+const keyHeaders = () => { const h = {}; const t = $('kTripo').value.trim(), m = $('kMeshy').value.trim(), f = $('kHf').value.trim(); if (t) h['X-Tripo-Key'] = t; if (m) h['X-Meshy-Key'] = m; if (f) h['X-HF-Token'] = f; return h; };
+const api = (path, opts = {}) => fetch(path, { ...opts, headers: { ...(opts.headers || {}), 'X-App-Token': $('token').value, ...keyHeaders() } }).then(async r => { const j = r.headers.get('content-type')?.includes('json') ? await r.json() : null; if (!r.ok) throw new Error(j && j.error || r.statusText); return j || r; });
 $('token').value = store.get('token', ''); $('token').addEventListener('change', () => store.set('token', $('token').value));
+[['kHf', 'hf'], ['kTripo', 'tripo'], ['kMeshy', 'meshy']].forEach(([id, k]) => { $(id).value = store.get('key.' + k, ''); $(id).addEventListener('input', () => { store.set('key.' + k, $(id).value.trim()); syncAi(); }); });
 (async () => {
   if (!/^https?:$/.test(location.protocol)) return;
   try { const r = await fetch('/api/health'); if (!r.ok) return; const h = await r.json(); if (!h.ok) return;
     S.ai = h; $('aiOff').hidden = true; $('aiOn').hidden = false; $('picOff').hidden = true; $('tokenF').hidden = false;
-    [...$('engine').options].forEach(o => { if (!h[o.value]) { o.disabled = true; o.textContent += ' (not set up)'; } });
-    const firstOn = [...$('engine').options].find(o => !o.disabled); if (firstOn) { $('engine').value = firstOn.value; engineOpts(); }
+    syncAi(true);
     syncAi();
   } catch (_) { /* not served by a Seamline server */ }
 })();
@@ -581,6 +605,19 @@ function renderJoints() {
     l.querySelector('span').textContent = `${g.a} / ${g.b}`; box.appendChild(l);
   });
 }
+// ---------------------------------------------------------------- built-in body joints
+async function findBody(auto) {
+  const r = await call('bodyJoints', { secondary: $('bodySecondary').checked });
+  S.guided = r.cuts.map(c => ({ ...c, on: true })); renderJoints();
+  $('jointsHint').textContent = S.guided.length
+    ? `Found ${S.guided.length} joint${S.guided.length > 1 ? 's' : ''}. Untick any you don't want, then Split. Cut faces get connectors and numbers like any other cut.`
+    : (r.note || 'No limbs found on this model. It will be split at its narrowest points instead.');
+  if (!auto) setStatus(S.guided.length ? `Found ${S.guided.length} body joints` : 'No body joints found', false);
+  return S.guided.length;
+}
+$('bodyGo').onclick = () => busy('Finding body joints…', () => findBody(false));
+$('bodySecondary').onchange = () => { if (S.pieces.length) busy('Finding body joints…', () => findBody(false)); };
+
 // ---------------------------------------------------------------- picture -> 3D
 document.querySelectorAll('input[name=src]').forEach(r => r.addEventListener('change', () => {
   const pic = document.querySelector('input[name=src]:checked').value === 'pic';
@@ -591,11 +628,24 @@ function engineOpts() {
   $('pcOpts').hidden = e !== 'partcrafter' && e !== 'partpacker'; $('pcParts').closest('.field').hidden = e === 'partpacker'; $('tripoOpts').hidden = e !== 'tripo'; $('meshyOpts').hidden = e !== 'meshy';
   $('mergeF').hidden = (e === 'meshy' && $('mSplit').checked) || (e === 'tripo' && $('tpParts').value === '0');
 }
-$('engine').onchange = engineOpts; $('mSplit').onchange = engineOpts; $('tpParts').onchange = engineOpts;
-function syncAi() {
+$('engine').onchange = () => { engineOpts(); syncAi(); }; $('mSplit').onchange = engineOpts; $('tpParts').onchange = engineOpts;
+const ENGINE_NEEDS = { partpacker: 'Hugging Face token', partcrafter: 'GPU worker', tripo: 'Tripo key', meshy: 'Meshy key' };
+function engineReady(e) {
   const h = S.ai || {};
-  $('tripoGo').disabled = !h.tripo; $('meshyGo').disabled = !h.meshy;
-  $('picGo').disabled = ![...$('engine').options].some(o => h[o.value]);
+  if (!S.ai) return false;
+  if (e === 'partpacker') return !!(h.partpacker || $('kHf').value.trim());
+  if (e === 'tripo') return !!(h.tripo || $('kTripo').value.trim());
+  if (e === 'meshy') return !!(h.meshy || $('kMeshy').value.trim());
+  return !!h.partcrafter;
+}
+function syncAi(pickFirst) {
+  const opts = [...$('engine').options];
+  opts.forEach(o => { o.dataset.base = o.dataset.base || o.textContent; const ok = engineReady(o.value); o.textContent = o.dataset.base + (ok || !S.ai ? '' : ` (add ${ENGINE_NEEDS[o.value]})`); });
+  if (pickFirst && !engineReady($('engine').value)) { const f = opts.find(o => engineReady(o.value)); if (f) { $('engine').value = f.value; engineOpts(); } }
+  const ready = engineReady($('engine').value);
+  $('picGo').disabled = !ready; $('picGo').textContent = ready || !S.ai ? 'Make 3D model' : `Add your ${ENGINE_NEEDS[$('engine').value]} in AI keys first`;
+  $('tripoGo').disabled = !engineReady('tripo'); $('meshyGo').disabled = !engineReady('meshy');
+  const n = ['kHf', 'kTripo', 'kMeshy'].filter(k => $(k).value.trim()).length; $('keysState').textContent = n ? `${n} saved` : 'none yet';
 }
 syncAi();
 let picFile = null;
@@ -636,7 +686,8 @@ $('picGo').onclick = () => {
     else r = await call('loadParts', { name: base, buf, res: +$('mergeRes').value }, [buf]);
     S.colors = []; S.sel = -1; S.guided = (r.cuts || []).map(c => ({ ...c, on: true })); renderJoints();
     renderModel({ ...r, parts: j.kind === 'split' ? r.parts : 1 }); applyResult(r); viewer.fit();
-    if (S.guided.length) { $('aiBox').open = true; $('jointsHint').textContent = `${S.guided.length} joints from the AI parts. Untick any you don't want cut.`; }
+    if (S.guided.length) $('jointsHint').textContent = `${S.guided.length} joints from the AI parts. Untick any you don't want cut.`;
+    else if (j.kind !== 'split') await findBody(true);
     const where = S.guided.length ? ` with ${S.guided.length} joint cut${S.guided.length > 1 ? "s" : ""} ready` : j.kind === 'split' ? ` in ${r.parts} Meshy parts` : '';
     setStatus(`3D model ready${where}. Set its real size in step 02, then Split.`, false);
   });

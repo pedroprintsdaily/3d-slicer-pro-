@@ -157,6 +157,23 @@ console.log('joint attached at two spots (handle)');
   ok(g.pieces.length === 2 && g.notes.length === 0 && g.pieces.every(p => S.edgeStats(p.mesh).watertight), 'handle cut free at both spots: ' + g.pieces.length + ' pieces ' + g.notes.join(' '));
 }
 
+console.log('built-in body joints (humanoid, no AI)');
+{
+  const { human } = require('./human.js');
+  for (const pose of [0.6, 0.15]) {
+    const u = S.voxelUnion(Object.values(human(pose)), 160, 4).mesh;
+    const r = S.findBodyJoints(u, { res: 96 });
+    const names = r.cuts.map(c => c.a).sort().join(', ');
+    ok(names === 'head, left arm, left leg, right arm, right leg', `pose ${pose}: ${names}`);
+    const neck = r.cuts.find(c => c.a === 'head'), hips = r.cuts.filter(c => /leg/.test(c.a)), sh = r.cuts.filter(c => /arm/.test(c.a));
+    ok(neck && neck.c[2] > 1480 && neck.c[2] < 1600, 'neck cut at the neck: z=' + (neck && neck.c[2].toFixed(0)));
+    ok(hips.every(c => c.c[2] > 780 && c.c[2] < 980), 'hip cuts at the hips: z=' + hips.map(c => c.c[2].toFixed(0)).join(','));
+    ok(sh.every(c => Math.abs(c.c[0]) > 110 && Math.abs(c.c[0]) < 260), 'shoulder cuts at the shoulders: x=' + sh.map(c => c.c[0].toFixed(0)).join(','));
+    const g = S.applyGuidedCuts([{ mesh: u }], r.cuts, { connector: { type: 'dowel', diameter: 0, depth: 0, tolerance: 0.2 }, label: true });
+    ok(g.pieces.length === 6 && g.pieces.every(p => S.edgeStats(p.mesh).watertight), `cut into ${g.pieces.length} closed pieces ${g.notes.join(' ')}`);
+  }
+}
+
 console.log('io');
 {
   const stl = S.stlBinary(fig, 'fig'); const back = S.parseSTL(stl.buffer.slice(0));

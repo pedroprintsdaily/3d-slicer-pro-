@@ -1328,7 +1328,7 @@ function applyGuidedCuts(pieces, cuts, settings) {
  ORs them, softens the voxels and extracts one watertight surface with marching tetrahedra.
  res = voxels along the longest side.
 */
-function voxelUnion(meshes, res = 192, smoothIters = 6, progress) {
+function solidGrid(meshes, res, progress) {
   const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
   for (const m of meshes) { const b = bbox(m); for (let a = 0; a < 3; a++) { mn[a] = Math.min(mn[a], b.min[a]); mx[a] = Math.max(mx[a], b.max[a]); } }
   const size = sub(mx, mn), L = Math.max(...size) || 1, h = L / res, pad = 3;
@@ -1380,6 +1380,12 @@ function voxelUnion(meshes, res = 192, smoothIters = 6, progress) {
       const v = tmp[id(i, j, k)]; if (((v & 1) + ((v >> 1) & 1) + ((v >> 2) & 1)) >= 2) solid[id(i, j, k)] = 1;
     }
   });
+  return { solid, dims, org, h, nx, ny, nz, N, id };
+}
+
+function voxelUnion(meshes, res = 192, smoothIters = 6, progress) {
+  const G = solidGrid(meshes, res, progress);
+  const { solid, dims, org, h, nx, ny, nz, N, id } = G;
   if (progress) progress({ stage: 'surface' });
   // soften: 3x3x3 neighbour count (0..27) at each grid point, iso 13.5
   const F = new Uint8Array(N);
@@ -1463,6 +1469,158 @@ function taubin(m, iters, lambda = 0.5, mu = -0.53) {
     const sw = P; P = Q; Q = sw;
   }
   return { P, T: m.T, G: m.G };
+}
+
+// ---------------------------------------------------------------- built-in anatomical joints (no AI)
+/*
+ findBodyJoints(mesh, {res, secondary, up}) finds where limbs, head and tail join the body:
+ 1. fill the model on a voxel grid and measure each voxel's distance to the surface (thickness)
+ 2. the thickest voxel is the core (chest / pelvis); walk outward along the middle of the shape
+ 3. tips that stick out far (head, hands, feet, tail, horns) are the farthest points from the core
+ 4. along each tip's path the thickness jumps where the limb meets the body: cut at that narrowing
+    (neck, shoulder, hip), across the limb's direction. With secondary, also at elbows and knees.
+ Returns cuts in the same shape as proposeGuidedCuts.
+*/
+function findBodyJoints(mesh, opts = {}) {
+  const res = opts.res || 96, up = opts.up || [0, 0, 1];
+  const G = solidGrid([mesh], res);
+  const { dims, org, h, nx, ny, nz, N, id } = G;
+  // solid := everything not reachable from outside (fills internal voids so hollow parts still count)
+  const solid = G.solid, outside = new Uint8Array(N);
+  { const st = []; const push = p => { if (!outside[p] && !solid[p]) { outside[p] = 1; st.push(p); } };
+    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) { push(id(0, j, k)); push(id(nx - 1, j, k)); }
+    for (let k = 0; k < nz; k++) for (let i = 0; i < nx; i++) { push(id(i, 0, k)); push(id(i, ny - 1, k)); }
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { push(id(i, j, 0)); push(id(i, j, nz - 1)); }
+    while (st.length) { const p = st.pop(); const i = p % nx, j = Math.floor(p / nx) % ny, k = Math.floor(p / (nx * ny));
+      if (i > 0) push(p - 1); if (i < nx - 1) push(p + 1); if (j > 0) push(p - nx); if (j < ny - 1) push(p + nx); if (k > 0) push(p - nx * ny); if (k < nz - 1) push(p + nx * ny); } }
+  for (let p = 0; p < N; p++) solid[p] = outside[p] ? 0 : 1;
+  // 26-neighbour offsets and lengths
+  const NB = []; for (let dk = -1; dk <= 1; dk++) for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) if (di || dj || dk) NB.push([di, dj, dk, Math.hypot(di, dj, dk)]);
+  // distance to surface (two-pass chamfer, voxel units)
+  const DT = new Float32Array(N); for (let p = 0; p < N; p++) DT[p] = solid[p] ? 1e9 : 0;
+  const fwd = NB.filter(([di, dj, dk]) => dk < 0 || (dk === 0 && (dj < 0 || (dj === 0 && di < 0))));
+  const bwd = NB.filter(o => !fwd.includes(o));
+  const pass = (list, dir) => {
+    const k0 = dir > 0 ? 0 : nz - 1, k1 = dir > 0 ? nz : -1, j0 = dir > 0 ? 0 : ny - 1, j1 = dir > 0 ? ny : -1, i0 = dir > 0 ? 0 : nx - 1, i1 = dir > 0 ? nx : -1;
+    for (let k = k0; k !== k1; k += dir) for (let j = j0; j !== j1; j += dir) for (let i = i0; i !== i1; i += dir) {
+      const p = id(i, j, k); if (!solid[p]) continue; let v = DT[p];
+      for (const [di, dj, dk, l] of list) { const a = i + di, b = j + dj, c = k + dk; if (a < 0 || b < 0 || c < 0 || a >= nx || b >= ny || c >= nz) { v = Math.min(v, l); continue; } const q = DT[id(a, b, c)] + l; if (q < v) v = q; }
+      DT[p] = v;
+    }
+  };
+  pass(fwd, 1); pass(bwd, -1);
+  let core = -1, R = 0; for (let p = 0; p < N; p++) if (solid[p] && DT[p] > R) { R = DT[p]; core = p; }
+  if (core < 0 || R < 1.5) return { cuts: [], note: 'The model is too thin to find body parts at this detail.' };
+  const xyz = p => [p % nx, Math.floor(p / nx) % ny, Math.floor(p / (nx * ny))];
+  const world = p => { const [i, j, k] = xyz(p); return [org[0] + (i + 0.5) * h, org[1] + (j + 0.5) * h, org[2] + (k + 0.5) * h]; };
+  // Dijkstra over solid voxels; weight favours the middle of the shape so paths follow the limb's centre
+  // Dijkstra over solid voxels (indexed binary heap); centred weights keep paths in the middle of the limb
+  const dijkstra = (sources, centred) => {
+    const dist = new Float32Array(N).fill(Infinity), par = new Int32Array(N).fill(-1);
+    const heap = new Int32Array(N), pos = new Int32Array(N).fill(-1); let hn = 0;
+    const less = (x, y) => dist[heap[x]] < dist[heap[y]];
+    const swap = (x, y) => { const t = heap[x]; heap[x] = heap[y]; heap[y] = t; pos[heap[x]] = x; pos[heap[y]] = y; };
+    const upH = c => { while (c) { const pa = (c - 1) >> 1; if (!less(c, pa)) break; swap(c, pa); c = pa; } };
+    const downH = c => { for (;;) { const l = 2 * c + 1, r2 = l + 1; let m = c; if (l < hn && less(l, m)) m = l; if (r2 < hn && less(r2, m)) m = r2; if (m === c) break; swap(m, c); c = m; } };
+    const pushOrDec = q => { if (pos[q] < 0) { heap[hn] = q; pos[q] = hn; hn++; } upH(pos[q]); };
+    for (const s0 of sources) { dist[s0] = 0; pushOrDec(s0); }
+    const sx = 1, sy = nx, sz = nx * ny;
+    while (hn) {
+      const p = heap[0]; hn--; if (hn) { heap[0] = heap[hn]; pos[heap[0]] = 0; downH(0); } pos[p] = -2;
+      const i = p % nx, j = Math.floor(p / nx) % ny, k = Math.floor(p / sz), d = dist[p];
+      for (let t = 0; t < 26; t++) {
+        const o = NB[t], a2 = i + o[0], b2 = j + o[1], c2 = k + o[2];
+        if (a2 < 0 || b2 < 0 || c2 < 0 || a2 >= nx || b2 >= ny || c2 >= nz) continue;
+        const q = p + o[0] * sx + o[1] * sy + o[2] * sz; if (!solid[q] || pos[q] === -2) continue;
+        const w = centred ? o[3] * (1 + 4 / (DT[q] + 0.5)) : o[3];
+        if (d + w < dist[q]) { dist[q] = d + w; par[q] = p; pushOrDec(q); }
+      }
+    }
+    return { dist, par };
+  };
+  // tips: farthest-point sampling by distance inside the shape
+  const tips = [], minLen = Math.max(3 * R, res * 0.12);
+  let D = dijkstra([core], false).dist;
+  for (let t = 0; t < 10; t++) {
+    let best = -1, bd = 0; for (let p = 0; p < N; p++) if (solid[p] && D[p] < Infinity && D[p] > bd) { bd = D[p]; best = p; }
+    if (best < 0 || bd < minLen) break;
+    tips.push(best);
+    const Dn = dijkstra([best], false).dist; for (let p = 0; p < N; p++) if (Dn[p] < D[p]) D[p] = Dn[p];
+  }
+  const { par } = dijkstra([core], true);
+  const coreW = world(core), upn = norm(up);
+  const cuts = [], used = [];
+  const dirAt = (path, s, k = 3) => { const a = world(path[Math.max(0, s - k)]), b = world(path[Math.min(path.length - 1, s + k)]); return norm(sub(a, b)); }; // toward the tip
+  const addCut = (path, s, kind, tip) => {
+    const c = world(path[s]); const n = dirAt(path, s);
+    for (const u of used) if (len(sub(u, c)) < Math.max(2.5 * h, DT[path[s]] * h * 1.2)) return false;
+    used.push(c);
+    cuts.push({ kind, tip, c, n, d: dot(n, c), r: DT[path[s]] * h, size: Math.round(DT[path[s]] * 10), spots: [c] });
+    return true;
+  };
+  // centre paths from every tip to the core share voxels where limbs branch off the body
+  const paths = tips.map(tip => { const path = []; for (let p = tip; p >= 0; p = par[p]) { path.push(p); if (p === core) break; } return path[path.length - 1] === core ? path : null; });
+  const stepLen = (pa, s) => len(sub(world(pa[s]), world(pa[s + 1]))) / h;
+  // a tip is a real limb if its path runs a good way out from where it branches and is clearly thinner than the body there
+  const analyse = (live) => {
+    const through = new Map(); live.forEach(ti => paths[ti].forEach(p => through.set(p, (through.get(p) || 0) + 1)));
+    const out = {};
+    for (const ti of live) {
+      const path = paths[ti], r = path.map(p => DT[p]);
+      let sb = path.length - 1; for (let s2 = 0; s2 < path.length; s2++) if (through.get(path[s2]) >= 2) { sb = s2; break; }
+      const Rb = Math.max(r[sb], ...r.slice(sb, Math.min(r.length, sb + 6)));
+      const along = new Float32Array(sb + 1); for (let s2 = sb - 1; s2 >= 0; s2--) along[s2] = along[s2 + 1] + stepLen(path, s2);
+      let thin = 0; for (let s2 = 0; s2 < sb; s2++) if (r[s2] <= 0.75 * Rb) thin += stepLen(path, s2);
+      out[ti] = { path, r, sb, Rb, along, limbLen: along[0], ok: along[0] >= Math.max(2.2 * Rb, 4) && thin >= Math.max(1.2 * Rb, 3) };
+    }
+    return out;
+  };
+  let live = paths.map((p, i) => (p && p.length >= 6 ? i : -1)).filter(i => i >= 0), info = analyse(live);
+  for (let it = 0; it < 6; it++) { const keep = live.filter(ti => info[ti].ok); if (keep.length === live.length) break; live = keep; info = analyse(live); }
+  live.forEach(ti => {
+    const { path, r, sb, Rb, along, limbLen, ok } = info[ti];
+    if (!ok) return;
+    // the limb starts where it becomes clearly thinner than the body; cut at its narrowest point just past that
+    let start = -1; for (let s2 = sb; s2 >= 0; s2--) if (r[s2] <= 0.75 * Rb) { start = s2; break; }
+    if (start < 0) return;
+    const reach = along[start] + Math.max(2 * r[start], 0.15 * limbLen);
+    let sMin = start;
+    for (let s2 = start; s2 >= 0; s2--) {
+      if (along[s2] > Math.min(reach, 0.7 * limbLen)) break;
+      if (r[s2] < r[sMin]) sMin = s2;
+    }
+    if (!addCut(path, sMin, 'junction', ti)) return;
+    const isHead = (() => { const v = sub(world(path[0]), coreW); return dot(v, norm(up)) > 0 && Math.abs(dot(v, norm(up))) > 0.8 * len(v); })();
+    if (opts.secondary && !isHead) {
+      // elbows / knees: clear narrowings between the cut and the tip
+      const lim = r.slice(0, sMin);
+      for (let s2 = Math.ceil(2 * r[sMin]) + 2; s2 < sMin - Math.ceil(1.5 * r[sMin]); s2++) {
+        const w2 = Math.ceil(Math.max(3, lim[s2] * 2.5));
+        let a2 = 0, b2 = 0, isMin = true;
+        for (let q = Math.max(0, s2 - w2); q <= Math.min(sMin - 1, s2 + w2); q++) { if (lim[q] < lim[s2]) { isMin = false; break; } if (q < s2) a2 = Math.max(a2, lim[q]); if (q > s2) b2 = Math.max(b2, lim[q]); }
+        if (isMin && lim[s2] <= 0.85 * Math.min(a2, b2) && lim[s2] >= 1) { addCut(path, s2, 'mid', ti); s2 += w2; }
+      }
+    }
+  });
+  // name the parts from where they sit relative to the core (up axis, left/right across it)
+  const side = (() => { const ax = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].filter(a => Math.abs(dot(a, upn)) < 0.5); return ax[0] || [1, 0, 0]; })();
+  const tipInfo = tips.map(t => { const v = sub(world(t), coreW); return { up: dot(v, upn), side: dot(v, side), tip: t }; });
+  const juncs = cuts.filter(c => c.kind === 'junction');
+  const headTip = juncs.length ? juncs.reduce((b, c) => (tipInfo[c.tip].up > tipInfo[b.tip].up ? c : b)).tip : -1;
+  const label = c => {
+    const ti = tipInfo[c.tip], jv = sub(c.c, coreW), lr = Math.abs(ti.side) < R * h * 0.5 ? '' : (ti.side > 0 ? 'left ' : 'right ');
+    if (c.tip === headTip && ti.up > 0 && Math.abs(ti.side) < Math.abs(ti.up)) return 'head';
+    if (dot(jv, upn) > -R * h * 0.3 && ti.up > -Math.abs(ti.side) * 3) return lr + 'arm';
+    if (ti.up < 0 && Math.abs(ti.side) < Math.abs(ti.up) * 0.6 && lr === '') return 'tail or base';
+    return lr + 'leg';
+  };
+  for (const c of cuts) {
+    const base = label(c);
+    if (c.kind === 'junction') { c.a = base; c.b = 'body'; }
+    else { const joint = /arm/.test(base) ? 'elbow' : /leg/.test(base) ? 'knee' : 'joint'; c.a = base.replace(/(arm|leg)$/, '') + joint; c.b = base; }
+    c.key = c.a + '|' + c.b;
+  }
+  return { cuts: cuts.map(({ tip, kind, ...rest }) => ({ ...rest, kind })), core: coreW, tips: tips.map(world), voxel: h };
 }
 
 // ---------------------------------------------------------------- parts that join at each cut
@@ -1673,7 +1831,7 @@ function renderData(m) {
 const api = {
   makeMesh, bbox, volume, weldSoup, weldIndexed, subMesh, translateMesh, scaleMesh, rotateMesh, mergeMeshes, components, edgeStats, orientMesh, fillHoles,
   basisFor, fitPlane, earcut, loopArea, pointInLoops, distToLoops, poleOfInaccessibility, sectionLoops, groupIslands, sectionAreas,
-  cutMesh, fitsBed, layFlat, rotationTo, voxelUnion, taubin, chooseCut, autoSplit, proposeGuidedCuts, applyGuidedCuts, assemblyMap, cylinderMesh, dowelMesh,
+  cutMesh, fitsBed, layFlat, rotationTo, voxelUnion, taubin, findBodyJoints, solidGrid, chooseCut, autoSplit, proposeGuidedCuts, applyGuidedCuts, assemblyMap, cylinderMesh, dowelMesh,
   parseSTL, parseOBJ, parseGLB, stlBinary, threeMF, zipStore, crc32, renderData, textDots,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Seam = api;

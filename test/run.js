@@ -159,7 +159,12 @@ console.log('joint attached at two spots (handle)');
 
 console.log('built-in body joints (humanoid, no AI)');
 {
-  const { human } = require('./human.js');
+  const { human, chibi } = require('./human.js');
+  {
+    const u = S.voxelUnion(Object.values(chibi()), 160, 4).mesh, r = S.findBodyJoints(u, { res: 96 });
+    const names = r.cuts.map(c => c.a).sort().join(', '), neck = r.cuts.find(c => c.a === 'head');
+    ok(names === 'head, left arm, left leg, right arm, right leg' && neck && neck.c[2] > 1460 && neck.c[2] < 1580, 'big-head figure: ' + names + ' neck z=' + (neck && neck.c[2].toFixed(0)));
+  }
   for (const pose of [0.6, 0.15]) {
     const u = S.voxelUnion(Object.values(human(pose)), 160, 4).mesh;
     const r = S.findBodyJoints(u, { res: 96 });

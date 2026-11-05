@@ -1509,8 +1509,18 @@ function findBodyJoints(mesh, opts = {}) {
     }
   };
   pass(fwd, 1); pass(bwd, -1);
-  let core = -1, R = 0; for (let p = 0; p < N; p++) if (solid[p] && DT[p] > R) { R = DT[p]; core = p; }
-  if (core < 0 || R < 1.5) return { cuts: [], note: 'The model is too thin to find body parts at this detail.' };
+  // core = a thick voxel near the centre of mass (so a big stylised head isn't taken for the body)
+  let maxDT = 0, cx = 0, cy = 0, cz = 0, cnt = 0;
+  for (let p = 0; p < N; p++) if (solid[p]) { if (DT[p] > maxDT) maxDT = DT[p]; cx += p % nx; cy += Math.floor(p / nx) % ny; cz += Math.floor(p / (nx * ny)); cnt++; }
+  if (!cnt || maxDT < 1.5) return { cuts: [], note: 'The model is too thin to find body parts at this detail.' };
+  cx /= cnt; cy /= cnt; cz /= cnt;
+  let core = -1, best = -Infinity; const Lv = Math.max(nx, ny, nz);
+  for (let p = 0; p < N; p++) if (solid[p] && DT[p] >= 0.45 * maxDT) {
+    const i = p % nx, j = Math.floor(p / nx) % ny, k = Math.floor(p / (nx * ny));
+    const sc = DT[p] / maxDT - Math.hypot(i - cx, j - cy, k - cz) / (0.18 * Lv);
+    if (sc > best) { best = sc; core = p; }
+  }
+  const R = DT[core];
   const xyz = p => [p % nx, Math.floor(p / nx) % ny, Math.floor(p / (nx * ny))];
   const world = p => { const [i, j, k] = xyz(p); return [org[0] + (i + 0.5) * h, org[1] + (j + 0.5) * h, org[2] + (k + 0.5) * h]; };
   // Dijkstra over solid voxels; weight favours the middle of the shape so paths follow the limb's centre
@@ -1563,25 +1573,40 @@ function findBodyJoints(mesh, opts = {}) {
   const stepLen = (pa, s) => len(sub(world(pa[s]), world(pa[s + 1]))) / h;
   // a tip is a real limb if its path runs a good way out from where it branches and is clearly thinner than the body there
   const analyse = (live) => {
-    const through = new Map(); live.forEach(ti => paths[ti].forEach(p => through.set(p, (through.get(p) || 0) + 1)));
+    const pts = {}; for (const ti of live) pts[ti] = paths[ti].map(p => xyz(p));
     const out = {};
     for (const ti of live) {
       const path = paths[ti], r = path.map(p => DT[p]);
-      let sb = path.length - 1; for (let s2 = 0; s2 < path.length; s2++) if (through.get(path[s2]) >= 2) { sb = s2; break; }
+      // branch: first point (from the tip) that comes close to another limb's path or reaches the core
+      let sb = path.length - 1;
+      outer: for (let s2 = 0; s2 < path.length; s2++) {
+        const a = pts[ti][s2], lim = Math.max(1.5, 0.6 * r[s2]);
+        for (const tj of live) { if (tj === ti) continue; for (const b of pts[tj]) if (Math.abs(a[0] - b[0]) <= lim && Math.abs(a[1] - b[1]) <= lim && Math.abs(a[2] - b[2]) <= lim && Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) <= lim) { sb = s2; break outer; } }
+      }
       const Rb = Math.max(r[sb], ...r.slice(sb, Math.min(r.length, sb + 6)));
       const along = new Float32Array(sb + 1); for (let s2 = sb - 1; s2 >= 0; s2--) along[s2] = along[s2 + 1] + stepLen(path, s2);
       let thin = 0; for (let s2 = 0; s2 < sb; s2++) if (r[s2] <= 0.75 * Rb) thin += stepLen(path, s2);
-      out[ti] = { path, r, sb, Rb, along, limbLen: along[0], ok: along[0] >= Math.max(2.2 * Rb, 4) && thin >= Math.max(1.2 * Rb, 3) };
+      // or a clear neck: a narrowing with a bulb (head, hand, paw) beyond it
+      let neck = false;
+      for (let s2 = 1; s2 < sb && !neck; s2++) {
+        if (r[s2] > 0.7 * Rb || along[s2] < 0.5 * Rb) continue;
+        let bulb = 0; for (let q = 0; q < s2; q++) bulb = Math.max(bulb, r[q]);
+        if (bulb >= 1.4 * r[s2] && along[0] - along[s2] >= 1.5 * r[s2]) neck = true;
+      }
+      out[ti] = { path, r, sb, Rb, along, limbLen: along[0], ok: along[0] >= Math.max(1.6 * Rb, 4) && (thin >= Math.max(1.2 * Rb, 3) || neck) };
     }
     return out;
   };
   let live = paths.map((p, i) => (p && p.length >= 6 ? i : -1)).filter(i => i >= 0), info = analyse(live);
+  const all = live.slice();
   for (let it = 0; it < 6; it++) { const keep = live.filter(ti => info[ti].ok); if (keep.length === live.length) break; live = keep; info = analyse(live); }
+  // tips dropped early (their branch was thrown off by bumps) get a second look against the real limbs
+  for (const ti of all) if (!live.includes(ti)) { const one = analyse(live.concat([ti]))[ti]; if (one.ok) { info[ti] = one; live.push(ti); } }
   live.forEach(ti => {
     const { path, r, sb, Rb, along, limbLen, ok } = info[ti];
     if (!ok) return;
     // the limb starts where it becomes clearly thinner than the body; cut at its narrowest point just past that
-    let start = -1; for (let s2 = sb; s2 >= 0; s2--) if (r[s2] <= 0.75 * Rb) { start = s2; break; }
+    let start = -1; for (let s2 = sb; s2 >= 0; s2--) if (r[s2] <= 0.8 * Rb) { start = s2; break; }
     if (start < 0) return;
     const reach = along[start] + Math.max(2 * r[start], 0.15 * limbLen);
     let sMin = start;

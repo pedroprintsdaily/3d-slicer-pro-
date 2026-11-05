@@ -41,3 +41,5 @@ if (require.main === module) {
     console.log('   pieces', g.pieces.length, 'made', g.reports.length, '/', r.cuts.length, 'tight', g.pieces.every(p => S.edgeStats(p.mesh).watertight), g.notes);
   }
 }
+// stylised figure: head thicker than the torso
+module.exports.chibi = () => { const p = module.exports.human(0.5); p.head = module.exports.ell([0, -10, 1720], 210, 190, 200); p.neck = module.exports.capsule([0, 0, 1480], [0, 0, 1560], 60); return p; };

@@ -3,7 +3,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 const INDEX_GZ_B64 = [
-  "H4sIADoB7WoC/+y963Ib15Ym+F9PkWZ3HSElEAJASZZIUW5ZtmRVybZako+PzWBUJYAkmSJuRII36Siifs0DTHTEvME8wMyP/t/zJvUk831r7WtmAiRln56YmHHVEZH7fll77XXbaz35ajQbLi/neXK0nIyfPuG/yTibHu5u5NMNfOfZ6OmTSb7MkuFRtijz5e7G6fJg89GGSZ1mk3x346zIz+ezxXIjGc6my3yKUufFaHm0O8rPimG+KR/tYlosi2y8WQ6zcb7ba9tamwfFcnc4O8sXaLVcXo7zp9uL2Wz5aZ6NRsX0cHM5m2/n07NWmR3km9kizzaLKYbC9HZ3fpHu2IKD2XI5mzSW1Swp/nkwG11+mmSLw2K63f385J72+eSezpa5T58siyXS3uXZZFxM8yf39PtWOOvhODsd5dvhNDbLYpSXwTKYad16glaOk0U+3t2YL3JkT/MhlutokR/sbhwtl/Ny+969A9QqO4ez2eE4z+ZF2RnOJnFdGWl5lOfXqntvWJb9bw6ySTG+3H1+lB0vsrtv8uXwaPv88Gj5Xx50uzsPu92/mAKvvv3x7ptxfnH3XTYttcR9lFhV6sfZdBaV+suoKOfj7HK3PM/mHLYu6617d5LX2eXsdLmdnM8Wx+XRbJ4M8unwKPmPf/9vydZ3SbnMDvNkNk2WR3kyzg+WSQs7y4T50Wyal2k7mZ5OBvkiH0kLqJDPy6SYJllSDhezMdbnMOHKJ/Nsmo87yZ17twSCkk+3kmRzc3C4nfyn/HE+zA928CmFkHIwOBgejJiC9cV371G/23/E78npMh8h5UH28OHXfaYQCJAw2ho9Hh3sSKvZcIgtRmL2+MHD3mDHJW2WswOmH2zlW6P7Qbp2cyD/aRszJvQHX2f3pf4gY6+D7tb9fsZvWZnNjB0f5Pfzxz5tgLTh41FvJOM9XBSs+Ch7/DDb0pYPNs12bCcbuvWJbP1GO9l4m30YHWXTgr/f5YezPPnlFX6Xl1jYyeZpgZ8Agc0yXxQHtjWeCjSF7U+4/QmB5Cb1JwSXoD7BB3VOC8kp59kwZ2svmL75Nj88HWcL5P+YT8ezduLKaHOL7eTR/GLn1udb/2WSj4osaeFQHeSLcnM4G88WwDBH+QT7NcoWx2nyKRFg2J7Olq29UbbMNpfM3t0YFwDfjf00BJNev2c204JJ71Fv1N/yYIKN",
+  "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",
@@ -148,19 +148,27 @@ async function meshyWait(id: string, path: string, task: string, label: string) 
 
 // PartPacker (NVIDIA, image -> 3D in parts) through its Hugging Face Space (free GPU time with an HF token)
 async function gradio(base: string, name: string, data: unknown[], token: string) {
-  const h: Record<string, string> = { "Content-Type": "application/json" }; if (token) h.Authorization = `Bearer ${token}`;
-  const r = await fetch(`${base}/gradio_api/call/${name}`, { method: "POST", headers: h, body: JSON.stringify({ data }) });
-  if (!r.ok) throw new UpErr(r.status, `PartPacker ${name}: ${(await r.text()).slice(0, 300)}`);
-  const { event_id } = await r.json() as any;
-  const s = await fetch(`${base}/gradio_api/call/${name}/${event_id}`, { headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(900000) });
+  // queue API: unlike /call, it reports the Space's actual error text (quota, size limits, crashes)
+  const auth: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const cfg = await fetch(`${base}/config`, { headers: auth }).then(r => r.json()) as any;
+  const dep = cfg.dependencies.findIndex((d: any) => d.api_name === name);
+  if (dep < 0) throw new UpErr(502, `PartPacker has no ${name} step (the demo changed)`);
+  const session = Math.random().toString(36).slice(2, 12);
+  const j = await fetch(`${base}/gradio_api/queue/join`, { method: "POST", headers: { "Content-Type": "application/json", ...auth }, body: JSON.stringify({ data, fn_index: dep, trigger_id: cfg.dependencies[dep].targets?.[0]?.[0] ?? null, session_hash: session, event_data: null }) });
+  if (!j.ok) throw new UpErr(j.status, `PartPacker ${name}: ${(await j.text()).slice(0, 300)}`);
+  const s = await fetch(`${base}/gradio_api/queue/data?session_hash=${session}`, { headers: auth, signal: AbortSignal.timeout(900000) });
   const txt = await s.text();
-  const blocks = txt.split("\n\n").map(b => ({ ev: (b.match(/^event: (.*)$/m) || [])[1], data: (b.match(/^data: (.*)$/m) || [])[1] }));
-  const done = blocks.find(b => b.ev === "complete");
-  if (!done) {
-    const err = blocks.find(b => b.ev === "error");
-    throw new UpErr(502, `PartPacker ${name} failed: ${err?.data && err.data !== "null" ? err.data : "no message (usually out of free GPU time: set K().hf, or try again later)"}`);
+  let last: any = null;
+  for (const line of txt.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    try { const m = JSON.parse(line.slice(5)); if (m.msg === "process_completed") last = m; } catch {}
   }
-  return JSON.parse(done.data!);
+  if (!last) throw new UpErr(502, `PartPacker ${name}: no result (${txt.slice(-200).replace(/\s+/g, " ")})`);
+  if (!last.success) {
+    const msg = last.output?.error || last.title || "the demo reported an error with no details";
+    throw new UpErr(502, `PartPacker ${name}: ${msg}`);
+  }
+  return last.output.data;
 }
 async function runPartPacker(id: string, name: string, data: Uint8Array, opts: Record<string, string>) {
   jobSet(id, { stage: "Uploading the picture to PartPacker" });

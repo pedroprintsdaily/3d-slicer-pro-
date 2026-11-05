@@ -83,19 +83,27 @@ async function meshyWait(id: string, path: string, task: string, label: string) 
 
 // PartPacker (NVIDIA, image -> 3D in parts) through its Hugging Face Space (free GPU time with an HF token)
 async function gradio(base: string, name: string, data: unknown[], token: string) {
-  const h: Record<string, string> = { "Content-Type": "application/json" }; if (token) h.Authorization = `Bearer ${token}`;
-  const r = await fetch(`${base}/gradio_api/call/${name}`, { method: "POST", headers: h, body: JSON.stringify({ data }) });
-  if (!r.ok) throw new UpErr(r.status, `PartPacker ${name}: ${(await r.text()).slice(0, 300)}`);
-  const { event_id } = await r.json() as any;
-  const s = await fetch(`${base}/gradio_api/call/${name}/${event_id}`, { headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(900000) });
+  // queue API: unlike /call, it reports the Space's actual error text (quota, size limits, crashes)
+  const auth: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const cfg = await fetch(`${base}/config`, { headers: auth }).then(r => r.json()) as any;
+  const dep = cfg.dependencies.findIndex((d: any) => d.api_name === name);
+  if (dep < 0) throw new UpErr(502, `PartPacker has no ${name} step (the demo changed)`);
+  const session = Math.random().toString(36).slice(2, 12);
+  const j = await fetch(`${base}/gradio_api/queue/join`, { method: "POST", headers: { "Content-Type": "application/json", ...auth }, body: JSON.stringify({ data, fn_index: dep, trigger_id: cfg.dependencies[dep].targets?.[0]?.[0] ?? null, session_hash: session, event_data: null }) });
+  if (!j.ok) throw new UpErr(j.status, `PartPacker ${name}: ${(await j.text()).slice(0, 300)}`);
+  const s = await fetch(`${base}/gradio_api/queue/data?session_hash=${session}`, { headers: auth, signal: AbortSignal.timeout(900000) });
   const txt = await s.text();
-  const blocks = txt.split("\n\n").map(b => ({ ev: (b.match(/^event: (.*)$/m) || [])[1], data: (b.match(/^data: (.*)$/m) || [])[1] }));
-  const done = blocks.find(b => b.ev === "complete");
-  if (!done) {
-    const err = blocks.find(b => b.ev === "error");
-    throw new UpErr(502, `PartPacker ${name} failed: ${err?.data && err.data !== "null" ? err.data : "no message (usually out of free GPU time: set K().hf, or try again later)"}`);
+  let last: any = null;
+  for (const line of txt.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    try { const m = JSON.parse(line.slice(5)); if (m.msg === "process_completed") last = m; } catch {}
   }
-  return JSON.parse(done.data!);
+  if (!last) throw new UpErr(502, `PartPacker ${name}: no result (${txt.slice(-200).replace(/\s+/g, " ")})`);
+  if (!last.success) {
+    const msg = last.output?.error || last.title || "the demo reported an error with no details";
+    throw new UpErr(502, `PartPacker ${name}: ${msg}`);
+  }
+  return last.output.data;
 }
 async function runPartPacker(id: string, name: string, data: Uint8Array, opts: Record<string, string>) {
   jobSet(id, { stage: "Uploading the picture to PartPacker" });

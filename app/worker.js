@@ -52,8 +52,8 @@ const rotVT = (R, v) => [R[0] * v[0] + R[3] * v[1] + R[6] * v[2], R[1] * v[0] + 
 // guided joint cuts are kept in the model's own frame so resizing afterwards keeps them in place
 const ptToBase = q => rotVT(W.X.R, [0, 1, 2].map(a => (q[a] - W.X.t[a]) / W.X.s));
 const ptToWorld = q => { const r = rotV(W.X.R, q); return [0, 1, 2].map(a => r[a] * W.X.s + W.X.t[a]); };
-function cutToBase(c) { const p = ptToBase(c.c), n = rotVT(W.X.R, c.n); return { ...c, c: p, n, d: n[0] * p[0] + n[1] * p[1] + n[2] * p[2], spots: (c.spots || []).map(ptToBase) }; }
-function cutToWorld(c) { const p = ptToWorld(c.c), n = rotV(W.X.R, c.n); return { ...c, c: p, n, d: n[0] * p[0] + n[1] * p[1] + n[2] * p[2], spots: (c.spots || []).map(ptToWorld) }; }
+function cutToBase(c) { const p = ptToBase(c.c), n = rotVT(W.X.R, c.n); return { ...c, c: p, n, d: n[0] * p[0] + n[1] * p[1] + n[2] * p[2], r: (c.r || 0) / W.X.s, spots: (c.spots || []).map(ptToBase) }; }
+function cutToWorld(c) { const p = ptToWorld(c.c), n = rotV(W.X.R, c.n); return { ...c, c: p, n, d: n[0] * p[0] + n[1] * p[1] + n[2] * p[2], r: (c.r || 0) * W.X.s, spots: (c.spots || []).map(ptToWorld) }; }
 function piecesPayload() {
   const transfer = [];
   const pieces = W.pieces.map((p, i) => {
@@ -182,6 +182,7 @@ const handlers = {
     let whole;
     if (parts.length === 1) whole = parts[0].mesh;
     else whole = Seam.voxelUnion(parts.map(p => p.mesh), res || 192, 6, p => postMessage({ progress: { text: p.stage === 'fill' ? `Merging parts… ${p.part}/${p.of}` : 'Building the surface…' } })).mesh;
+    const dust = Seam.dropDust(whole, 0.01); whole = dust.mesh; // loose specks from the AI
     const nt = normalizeTiny(whole, parts);
     W.base = nt.mesh; W.baseParts = null; W.name = name; W.xf = { scale: 1, up: 'z' }; W.seg = null;
     rebuild();
@@ -190,7 +191,7 @@ const handlers = {
       const lab = Seam.labelFromParts(W.current, nt.parts.map(p => ({ ...p, mesh: applyXf(p.mesh) })));
       if (lab) { W.seg = { lab, names: parts.map((p, i) => p.name || 'part ' + (i + 1)) }; out = regroup(level, bed); }
     }
-    return { info: info(W.base), name: W.name, parts: parts.length, scaled: nt.scaled, ...out };
+    return { info: info(W.base), name: W.name, parts: parts.length, scaled: nt.scaled, dust: dust.dropped, ...out };
   },
   regroup({ level, bed }) { return regroup(level, bed); },
   // colored preview of the parts before splitting
@@ -248,7 +249,7 @@ const handlers = {
   },
   bodyJoints({ level, bed }) { const r = regroup(level, bed); return { cuts: r.cuts, note: r.note }; },
 
-  toWorld({ cuts }) { return { rings: cuts.map(c => { const w = cutToWorld(c); return { c: w.c, n: w.n, r: (c.r || 0) * W.X.s }; }) }; },
+  toWorld({ cuts }) { return { rings: cuts.map(c => { const w = cutToWorld(c); return { c: w.c, n: w.n, r: w.r }; }) }; },
   wholeSTL() {
     const m = W.current;
     return { stl: Seam.stlBinary(m, W.name).buffer };

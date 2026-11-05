@@ -1216,7 +1216,7 @@ function autoSplit(pieces, settings, progress) {
       let r = cutMesh(pc.mesh, { n: c.n, d: c.d }, { cutId: id, connector: conn, label: settings.label, wall: settings.wall });
       if (r.error) continue;
       const comps = []; for (const half of [r.below, r.above]) for (const comp of components(half)) if (comp.T.length >= 12) comps.push(comp);
-      let bad = comps.filter(m => tinyPiece(m, settings, c.n)).length;
+      let bad = comps.filter(m => touchesCut(m, id) && tinyPiece(m, settings, c.n)).length;
       if (bad) {
         // try again leaving the small islands of this section uncut
         for (const f of [0.3, 0.12]) {
@@ -1224,7 +1224,7 @@ function autoSplit(pieces, settings, progress) {
           if (r2.error) continue;
           const c2 = []; for (const half of [r2.below, r2.above]) for (const comp of components(half)) if (comp.T.length >= 12) c2.push(comp);
           if (c2.length < 2) continue;
-          const b2 = c2.filter(m => tinyPiece(m, settings, c.n)).length;
+          const b2 = c2.filter(m => touchesCut(m, id) && tinyPiece(m, settings, c.n)).length;
           if (b2 < bad) { bad = b2; r = r2; comps.length = 0; comps.push(...c2); }
           if (!bad) break;
         }
@@ -1440,6 +1440,16 @@ function proposeGuidedCuts(original, segParts, opts = {}) {
   return { cuts: cutsFromRegions(original, tri, regions), labels: lab, tri, regions };
 }
 
+// only pieces made by this cut count (separate shells that were already loose are not the cut's fault)
+function touchesCut(m, id) { const G = m.G; if (!G) return true; for (let i = 0; i < G.length; i++) if (G[i] === id) return true; return false; }
+// loose specks: separate shells much smaller than the model (AI noise), dropped before cutting
+function dropDust(m, frac) {
+  const comps = components(m); if (comps.length < 2) return { mesh: m, dropped: 0 };
+  const vols = comps.map(c => Math.abs(volume(c))), tot = vols.reduce((a, b) => a + b, 0) || 1;
+  const keep = comps.filter((c, i) => vols[i] >= tot * frac);
+  if (!keep.length || keep.length === comps.length) return { mesh: m, dropped: 0 };
+  return { mesh: mergeMeshes(keep), dropped: comps.length - keep.length };
+}
 // a piece is too small to print well: tiny volume, or a thin sliver along the cut
 function tinyPiece(m, settings, n) {
   const minVol = settings.minPieceVol || 0, minThick = settings.minThick || 0;
@@ -1466,15 +1476,23 @@ function applyGuidedCuts(pieces, cuts, settings) {
     });
     if (bestI < 0) { notes.push(`Skipped ${c.a} / ${c.b}: not found.`); continue; }
     const base = { cutId: cutId + 1, localPoint: c.c, connector: settings.connector, label: settings.label, wall: settings.wall };
-    let r = cutMesh(list[bestI].mesh, { n: c.n, d: c.d }, base);
+    let r = cutMesh(list[bestI].mesh, { n: c.n, d: c.d }, base), used = c;
     if (r.error && /does not separate/.test(r.error) && c.spots && c.spots.length) {
       const b = bbox(list[bestI].mesh);
       r = cutMesh(list[bestI].mesh, { n: c.n, d: c.d }, { ...base, localSpots: c.spots, localTol: len(b.size) * 0.01 });
     }
+    // a messy boundary: slide the plane a little to either side, where the joint is often one clean ring
+    if (r.error && /does not separate/.test(r.error) && c.r > 0) {
+      for (const f of [0.35, -0.35, 0.7, -0.7]) {
+        const off = c.r * f, lp = add(c.c, mul(c.n, off));
+        const r2 = cutMesh(list[bestI].mesh, { n: c.n, d: c.d + off }, { ...base, localPoint: lp });
+        if (!r2.error) { r = r2; used = { ...c, c: lp, d: c.d + off }; break; }
+      }
+    }
     if (r.error) { notes.push(`Skipped ${c.a} / ${c.b}: ${r.error}`); continue; }
     const comps = []; for (const half of [r.below, r.above]) for (const comp of components(half)) if (comp.T.length >= 12) comps.push(comp);
-    if (comps.some(m => tinyPiece(m, settings, c.n))) { notes.push(`Kept ${c.a} / ${c.b} together: the cut would leave a piece too small to print.`); continue; }
-    cutId++; r.report.joint = c.a + ' / ' + c.b; Object.defineProperty(r.report, 'src', { value: c, enumerable: false }); reports.push(r.report);
+    if (comps.some(m => touchesCut(m, cutId + 1) && tinyPiece(m, settings, c.n))) { notes.push(`Kept ${c.a} / ${c.b} together: the cut would leave a piece too small to print.`); continue; }
+    cutId++; r.report.joint = c.a + ' / ' + c.b; Object.defineProperty(r.report, 'src', { value: used, enumerable: false }); reports.push(r.report);
     const rest = list.filter((_, i) => i !== bestI);
     for (const comp of comps) rest.push({ mesh: comp, avoid: [] });
     list = rest;
@@ -2060,7 +2078,7 @@ function renderData(m) {
 const api = {
   makeMesh, bbox, volume, weldSoup, weldIndexed, subMesh, translateMesh, scaleMesh, rotateMesh, mergeMeshes, components, edgeStats, orientMesh, fillHoles,
   basisFor, fitPlane, earcut, loopArea, pointInLoops, distToLoops, poleOfInaccessibility, sectionLoops, groupIslands, sectionAreas,
-  cutMesh, fitsBed, layFlat, rotationTo, voxelUnion, taubin, findBodyJoints, solidGrid, chooseCut, autoSplit, proposeGuidedCuts, applyGuidedCuts, DETAIL, detailOf, buildGrid, nearestInGrid, labelFromParts, mergeRegions, cutsFromRegions, tinyPiece, assemblyMap, cylinderMesh, dowelMesh,
+  cutMesh, fitsBed, layFlat, rotationTo, voxelUnion, taubin, findBodyJoints, solidGrid, chooseCut, autoSplit, proposeGuidedCuts, applyGuidedCuts, DETAIL, detailOf, dropDust, touchesCut, buildGrid, nearestInGrid, labelFromParts, mergeRegions, cutsFromRegions, tinyPiece, assemblyMap, cylinderMesh, dowelMesh,
   parseSTL, parseOBJ, parseGLB, stlBinary, threeMF, zipStore, crc32, renderData, textDots,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Seam = api;

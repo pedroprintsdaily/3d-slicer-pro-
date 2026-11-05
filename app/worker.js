@@ -50,8 +50,10 @@ function applyXf(m) { const X = W.X; return Seam.translateMesh(Seam.scaleMesh(Se
 const rotV = (R, v) => [R[0] * v[0] + R[1] * v[1] + R[2] * v[2], R[3] * v[0] + R[4] * v[1] + R[5] * v[2], R[6] * v[0] + R[7] * v[1] + R[8] * v[2]];
 const rotVT = (R, v) => [R[0] * v[0] + R[3] * v[1] + R[6] * v[2], R[1] * v[0] + R[4] * v[1] + R[7] * v[2], R[2] * v[0] + R[5] * v[1] + R[8] * v[2]];
 // guided joint cuts are kept in the model's own frame so resizing afterwards keeps them in place
-function cutToBase(c) { const X = W.X; const p = rotVT(X.R, [0, 1, 2].map(a => (c.c[a] - X.t[a]) / X.s)), n = rotVT(X.R, c.n); return { ...c, c: p, n, d: n[0] * p[0] + n[1] * p[1] + n[2] * p[2] }; }
-function cutToWorld(c) { const X = W.X; const r = rotV(X.R, c.c), p = [0, 1, 2].map(a => r[a] * X.s + X.t[a]), n = rotV(X.R, c.n); return { ...c, c: p, n, d: n[0] * p[0] + n[1] * p[1] + n[2] * p[2] }; }
+const ptToBase = q => rotVT(W.X.R, [0, 1, 2].map(a => (q[a] - W.X.t[a]) / W.X.s));
+const ptToWorld = q => { const r = rotV(W.X.R, q); return [0, 1, 2].map(a => r[a] * W.X.s + W.X.t[a]); };
+function cutToBase(c) { const p = ptToBase(c.c), n = rotVT(W.X.R, c.n); return { ...c, c: p, n, d: n[0] * p[0] + n[1] * p[1] + n[2] * p[2], spots: (c.spots || []).map(ptToBase) }; }
+function cutToWorld(c) { const p = ptToWorld(c.c), n = rotV(W.X.R, c.n); return { ...c, c: p, n, d: n[0] * p[0] + n[1] * p[1] + n[2] * p[2], spots: (c.spots || []).map(ptToWorld) }; }
 function piecesPayload() {
   const transfer = [];
   const pieces = W.pieces.map((p, i) => {
@@ -117,7 +119,7 @@ const handlers = {
     let cuts = [];
     if (parts.length > 1) {
       const r = Seam.proposeGuidedCuts(W.current, nt.parts.map(p => ({ ...p, mesh: applyXf(p.mesh) })));
-      if (!r.error) cuts = r.cuts.map(c => cutToBase({ a: c.a, b: c.b, c: c.c, n: c.n, d: c.d, size: c.size }));
+      if (!r.error) cuts = r.cuts.map(c => cutToBase({ a: c.a, b: c.b, c: c.c, n: c.n, d: c.d, size: c.size, spots: c.spots }));
     }
     return { info: info(W.base), name: W.name, parts: parts.length, scaled: nt.scaled, cuts };
   },
@@ -154,7 +156,7 @@ const handlers = {
     if (parts.length < 2) throw new Error('The segmentation came back as a single part.');
     const r = Seam.proposeGuidedCuts(W.current, parts);
     if (r.error) throw new Error(r.error);
-    return { cuts: r.cuts.map(c => cutToBase({ a: c.a, b: c.b, c: c.c, n: c.n, d: c.d, size: c.size })), partNames: parts.map(p => p.name) };
+    return { cuts: r.cuts.map(c => cutToBase({ a: c.a, b: c.b, c: c.c, n: c.n, d: c.d, size: c.size, spots: c.spots })), partNames: parts.map(p => p.name) };
   },
   wholeSTL() {
     const m = W.current;

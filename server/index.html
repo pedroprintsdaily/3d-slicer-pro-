@@ -1163,6 +1163,18 @@ function cutMeshOnce(mesh, plane, opts = {}) {
       for (const is of islands) { const dd = distToLoops(lp, [loopsUV[is.outer]]); if (dd < bd) { bd = dd; best = is; } }
       chosen = [best];
     }
+    // a part attached at several spots (handle, arm on a hip): also cut every island along the joint
+    if (opts.localSpots && opts.localSpots.length) {
+      const tol = opts.localTol || 2;
+      for (const sp of opts.localSpots) {
+        const q = [dot(sp, e1), dot(sp, e2)];
+        for (const is of islands) {
+          if (chosen.includes(is)) continue;
+          const L = [loopsUV[is.outer]];
+          if (pointInLoops(q, L) || distToLoops(q, L) <= tol) chosen.push(is);
+        }
+      }
+    }
   }
   const chosenLoops = new Set(); for (const is of chosen) { chosenLoops.add(is.outer); for (const h of is.holes) chosenLoops.add(h); }
   const cutStarts = new Set(); // segment start ids that are cut
@@ -1562,7 +1574,12 @@ function proposeGuidedCuts(original, segParts) {
     if (pts.length < 10) continue;
     const { c, n } = fitPlane(pts);
     const [i, j] = key.split('-').map(Number);
-    cuts.push({ key, a: segParts[i].name || 'part ' + (i + 1), b: segParts[j].name || 'part ' + (j + 1), c, n, d: dot(n, c), size: pts.length });
+    // spots: boundary points near the plane, thinned, so separate contact areas of one joint are all known
+    const spots = []; const dmax = len(ob.size) * 0.004;
+    const near = pts.filter(p => Math.abs(dot(n, p) - dot(n, c)) <= Math.max(dmax * 6, 1e-9));
+    const step = Math.max(1, Math.floor(near.length / 40));
+    for (let k = 0; k < near.length; k += step) spots.push(near[k]);
+    cuts.push({ key, a: segParts[i].name || 'part ' + (i + 1), b: segParts[j].name || 'part ' + (j + 1), c, n, d: dot(n, c), size: pts.length, spots });
   }
   cuts.sort((x, y) => y.size - x.size);
   return { cuts, labels: lab };
@@ -1581,7 +1598,12 @@ function applyGuidedCuts(pieces, cuts, settings) {
       for (let k = 0; k < pc.mesh.P.length / 3; k += step) { const dd = Math.hypot(pc.mesh.P[k * 3] - c.c[0], pc.mesh.P[k * 3 + 1] - c.c[1], pc.mesh.P[k * 3 + 2] - c.c[2]); if (dd < bd) { bd = dd; bestI = i; } }
     });
     if (bestI < 0) { notes.push(`Skipped ${c.a} / ${c.b}: not found.`); continue; }
-    const r = cutMesh(list[bestI].mesh, { n: c.n, d: c.d }, { cutId: cutId + 1, localPoint: c.c, connector: settings.connector, label: settings.label, wall: settings.wall });
+    const base = { cutId: cutId + 1, localPoint: c.c, connector: settings.connector, label: settings.label, wall: settings.wall };
+    let r = cutMesh(list[bestI].mesh, { n: c.n, d: c.d }, base);
+    if (r.error && /does not separate/.test(r.error) && c.spots && c.spots.length) {
+      const b = bbox(list[bestI].mesh);
+      r = cutMesh(list[bestI].mesh, { n: c.n, d: c.d }, { ...base, localSpots: c.spots, localTol: len(b.size) * 0.01 });
+    }
     if (r.error) { notes.push(`Skipped ${c.a} / ${c.b}: ${r.error}`); continue; }
     cutId++; r.report.joint = c.a + ' / ' + c.b; reports.push(r.report);
     const rest = list.filter((_, i) => i !== bestI);
@@ -2001,8 +2023,10 @@ function applyXf(m) { const X = W.X; return Seam.translateMesh(Seam.scaleMesh(Se
 const rotV = (R, v) => [R[0] * v[0] + R[1] * v[1] + R[2] * v[2], R[3] * v[0] + R[4] * v[1] + R[5] * v[2], R[6] * v[0] + R[7] * v[1] + R[8] * v[2]];
 const rotVT = (R, v) => [R[0] * v[0] + R[3] * v[1] + R[6] * v[2], R[1] * v[0] + R[4] * v[1] + R[7] * v[2], R[2] * v[0] + R[5] * v[1] + R[8] * v[2]];
 // guided joint cuts are kept in the model's own frame so resizing afterwards keeps them in place
-function cutToBase(c) { const X = W.X; const p = rotVT(X.R, [0, 1, 2].map(a => (c.c[a] - X.t[a]) / X.s)), n = rotVT(X.R, c.n); return { ...c, c: p, n, d: n[0] * p[0] + n[1] * p[1] + n[2] * p[2] }; }
-function cutToWorld(c) { const X = W.X; const r = rotV(X.R, c.c), p = [0, 1, 2].map(a => r[a] * X.s + X.t[a]), n = rotV(X.R, c.n); return { ...c, c: p, n, d: n[0] * p[0] + n[1] * p[1] + n[2] * p[2] }; }
+const ptToBase = q => rotVT(W.X.R, [0, 1, 2].map(a => (q[a] - W.X.t[a]) / W.X.s));
+const ptToWorld = q => { const r = rotV(W.X.R, q); return [0, 1, 2].map(a => r[a] * W.X.s + W.X.t[a]); };
+function cutToBase(c) { const p = ptToBase(c.c), n = rotVT(W.X.R, c.n); return { ...c, c: p, n, d: n[0] * p[0] + n[1] * p[1] + n[2] * p[2], spots: (c.spots || []).map(ptToBase) }; }
+function cutToWorld(c) { const p = ptToWorld(c.c), n = rotV(W.X.R, c.n); return { ...c, c: p, n, d: n[0] * p[0] + n[1] * p[1] + n[2] * p[2], spots: (c.spots || []).map(ptToWorld) }; }
 function piecesPayload() {
   const transfer = [];
   const pieces = W.pieces.map((p, i) => {
@@ -2068,7 +2092,7 @@ const handlers = {
     let cuts = [];
     if (parts.length > 1) {
       const r = Seam.proposeGuidedCuts(W.current, nt.parts.map(p => ({ ...p, mesh: applyXf(p.mesh) })));
-      if (!r.error) cuts = r.cuts.map(c => cutToBase({ a: c.a, b: c.b, c: c.c, n: c.n, d: c.d, size: c.size }));
+      if (!r.error) cuts = r.cuts.map(c => cutToBase({ a: c.a, b: c.b, c: c.c, n: c.n, d: c.d, size: c.size, spots: c.spots }));
     }
     return { info: info(W.base), name: W.name, parts: parts.length, scaled: nt.scaled, cuts };
   },
@@ -2105,7 +2129,7 @@ const handlers = {
     if (parts.length < 2) throw new Error('The segmentation came back as a single part.');
     const r = Seam.proposeGuidedCuts(W.current, parts);
     if (r.error) throw new Error(r.error);
-    return { cuts: r.cuts.map(c => cutToBase({ a: c.a, b: c.b, c: c.c, n: c.n, d: c.d, size: c.size })), partNames: parts.map(p => p.name) };
+    return { cuts: r.cuts.map(c => cutToBase({ a: c.a, b: c.b, c: c.c, n: c.n, d: c.d, size: c.size, spots: c.spots })), partNames: parts.map(p => p.name) };
   },
   wholeSTL() {
     const m = W.current;
@@ -2353,7 +2377,7 @@ function settings() {
   };
 }
 $('splitGo').onclick = () => busy('Finding the best cuts…', async () => {
-  const guided = S.guided.filter(g => g.on).map(g => ({ a: g.a, b: g.b, c: g.c, n: g.n, d: g.d }));
+  const guided = S.guided.filter(g => g.on).map(g => ({ a: g.a, b: g.b, c: g.c, n: g.n, d: g.d, spots: g.spots }));
   const r = await call('split', { settings: settings(), guided });
   S.sel = -1; applyResult(r); setStatus(`Split into ${r.pieces.length} pieces`, false);
   if (S.explode === 0) { $('explode').value = 35; viewer.setExplode(0.35); S.explode = 0.35; }

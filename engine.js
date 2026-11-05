@@ -871,6 +871,18 @@ function cutMeshOnce(mesh, plane, opts = {}) {
       for (const is of islands) { const dd = distToLoops(lp, [loopsUV[is.outer]]); if (dd < bd) { bd = dd; best = is; } }
       chosen = [best];
     }
+    // a part attached at several spots (handle, arm on a hip): also cut every island along the joint
+    if (opts.localSpots && opts.localSpots.length) {
+      const tol = opts.localTol || 2;
+      for (const sp of opts.localSpots) {
+        const q = [dot(sp, e1), dot(sp, e2)];
+        for (const is of islands) {
+          if (chosen.includes(is)) continue;
+          const L = [loopsUV[is.outer]];
+          if (pointInLoops(q, L) || distToLoops(q, L) <= tol) chosen.push(is);
+        }
+      }
+    }
   }
   const chosenLoops = new Set(); for (const is of chosen) { chosenLoops.add(is.outer); for (const h of is.holes) chosenLoops.add(h); }
   const cutStarts = new Set(); // segment start ids that are cut
@@ -1270,7 +1282,12 @@ function proposeGuidedCuts(original, segParts) {
     if (pts.length < 10) continue;
     const { c, n } = fitPlane(pts);
     const [i, j] = key.split('-').map(Number);
-    cuts.push({ key, a: segParts[i].name || 'part ' + (i + 1), b: segParts[j].name || 'part ' + (j + 1), c, n, d: dot(n, c), size: pts.length });
+    // spots: boundary points near the plane, thinned, so separate contact areas of one joint are all known
+    const spots = []; const dmax = len(ob.size) * 0.004;
+    const near = pts.filter(p => Math.abs(dot(n, p) - dot(n, c)) <= Math.max(dmax * 6, 1e-9));
+    const step = Math.max(1, Math.floor(near.length / 40));
+    for (let k = 0; k < near.length; k += step) spots.push(near[k]);
+    cuts.push({ key, a: segParts[i].name || 'part ' + (i + 1), b: segParts[j].name || 'part ' + (j + 1), c, n, d: dot(n, c), size: pts.length, spots });
   }
   cuts.sort((x, y) => y.size - x.size);
   return { cuts, labels: lab };
@@ -1289,7 +1306,12 @@ function applyGuidedCuts(pieces, cuts, settings) {
       for (let k = 0; k < pc.mesh.P.length / 3; k += step) { const dd = Math.hypot(pc.mesh.P[k * 3] - c.c[0], pc.mesh.P[k * 3 + 1] - c.c[1], pc.mesh.P[k * 3 + 2] - c.c[2]); if (dd < bd) { bd = dd; bestI = i; } }
     });
     if (bestI < 0) { notes.push(`Skipped ${c.a} / ${c.b}: not found.`); continue; }
-    const r = cutMesh(list[bestI].mesh, { n: c.n, d: c.d }, { cutId: cutId + 1, localPoint: c.c, connector: settings.connector, label: settings.label, wall: settings.wall });
+    const base = { cutId: cutId + 1, localPoint: c.c, connector: settings.connector, label: settings.label, wall: settings.wall };
+    let r = cutMesh(list[bestI].mesh, { n: c.n, d: c.d }, base);
+    if (r.error && /does not separate/.test(r.error) && c.spots && c.spots.length) {
+      const b = bbox(list[bestI].mesh);
+      r = cutMesh(list[bestI].mesh, { n: c.n, d: c.d }, { ...base, localSpots: c.spots, localTol: len(b.size) * 0.01 });
+    }
     if (r.error) { notes.push(`Skipped ${c.a} / ${c.b}: ${r.error}`); continue; }
     cutId++; r.report.joint = c.a + ' / ' + c.b; reports.push(r.report);
     const rest = list.filter((_, i) => i !== bestI);

@@ -476,7 +476,7 @@ function settings() {
   };
 }
 $('splitGo').onclick = () => busy('Finding the best cuts…', async () => {
-  const guided = S.guided.filter(g => g.on).map(g => ({ a: g.a, b: g.b, c: g.c, n: g.n, d: g.d }));
+  const guided = S.guided.filter(g => g.on).map(g => ({ a: g.a, b: g.b, c: g.c, n: g.n, d: g.d, spots: g.spots }));
   const r = await call('split', { settings: settings(), guided });
   S.sel = -1; applyResult(r); setStatus(`Split into ${r.pieces.length} pieces`, false);
   if (S.explode === 0) { $('explode').value = 35; viewer.setExplode(0.35); S.explode = 0.35; }

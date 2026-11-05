@@ -146,6 +146,17 @@ console.log('voxel union of overlapping parts');
   ok(g.pieces.length === 2 && g.pieces.every(p => S.edgeStats(p.mesh).watertight), 'guided split of union -> 2 watertight pieces ' + g.notes.join(' '));
 }
 
+console.log('joint attached at two spots (handle)');
+{
+  const body = sh.revolve(sh.sphereProfile(70, 0, 32), 48);
+  const bar = (z, L) => S.translateMesh(S.rotateMesh(sh.revolve([[0, 0], [10, 0.01], [10, L], [0, L + 0.01]], 24), [0, 0, 1, 0, 1, 0, -1, 0, 0]), [40, 0, z]);
+  const up = bar(40, 70), dn = bar(-40, 70), side = S.translateMesh(sh.revolve([[0, 0], [10, 0.01], [10, 100], [0, 100.01]], 24), [110, 0, -50]);
+  const u = S.voxelUnion([body, up, dn, side], 160, 6).mesh;
+  const prop = S.proposeGuidedCuts(u, [{ name: 'body', mesh: body }, { name: 'handle', mesh: S.mergeMeshes([up, dn, side]) }]);
+  const g = S.applyGuidedCuts([{ mesh: u }], prop.cuts, { connector: { type: 'dowel', diameter: 0, depth: 0, tolerance: 0.2 }, label: true });
+  ok(g.pieces.length === 2 && g.notes.length === 0 && g.pieces.every(p => S.edgeStats(p.mesh).watertight), 'handle cut free at both spots: ' + g.pieces.length + ' pieces ' + g.notes.join(' '));
+}
+
 console.log('io');
 {
   const stl = S.stlBinary(fig, 'fig'); const back = S.parseSTL(stl.buffer.slice(0));

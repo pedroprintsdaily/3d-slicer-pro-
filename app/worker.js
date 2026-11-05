@@ -73,7 +73,7 @@ function resetPieces() {
   W.pieces = W.baseParts ? W.baseParts.map(p => ({ mesh: applyXf(p.mesh) })) : [{ mesh: W.current }];
   nameAll();
 }
-function rebuild() { computeXf(); W.current = applyXf(W.base); resetPieces(); }
+function rebuild() { computeXf(); W.current = applyXf(W.base); resetPieces(); W.preview = null; }
 // AI models come out about 1 unit tall: make them a visible 300 mm until the user sets a size
 function normalizeTiny(mesh, parts) {
   const b = Seam.bbox(mesh), m = Math.max(...b.size);
@@ -83,21 +83,64 @@ function normalizeTiny(mesh, parts) {
 }
 
 // joint planes from the AI part labels at the chosen detail level
-function regroup(level) {
-  // Simple: the anatomy (head, arms, legs, tail) when the model has limbs; AI part labels otherwise
+// Try the joints on the whole model (no connectors). Only joints that really separate a printable piece
+// are kept, and the pieces become the colored preview, so what you see is what Split makes.
+function trialCuts(cutsWorld, level, bed) {
+  const st = withMinPiece({ level, bed, connector: { type: 'none' }, label: false });
+  const g = Seam.applyGuidedCuts([{ mesh: W.current }], cutsWorld, st);
+  return { ok: g.reports.map(r => r.src), pieces: g.pieces };
+}
+function nameRegions(pieces, mode, cutsWorld) {
+  const total = Math.abs(Seam.volume(W.current)) || 1;
+  const pcs = pieces.map(p => ({ mesh: p.mesh, v: Math.abs(Seam.volume(p.mesh)) })).sort((x, y) => y.v - x.v);
+  let grid = null, vreg = null;
+  if (mode === 'ai' && W.seg && W.seg.tri) {
+    const T = W.current.T; vreg = new Int32Array(W.current.P.length / 3);
+    for (let t = 0; t < T.length / 3; t++) for (let k = 0; k < 3; k++) vreg[T[t * 3 + k]] = W.seg.tri[t];
+    grid = Seam.buildGrid(W.current.P, Math.max(...Seam.bbox(W.current).size) / 60);
+  }
+  const used = new Map();
+  return pcs.map((p, i) => {
+    let name = i === 0 ? 'body' : 'part ' + (i + 1);
+    const P = p.mesh.P, st = Math.max(1, Math.floor(P.length / 3 / 600));
+    if (grid) { // the AI part covering most of this piece
+      const votes = new Map();
+      for (let k = 0; k < P.length / 3; k += st) { const q = Seam.nearestInGrid(grid, W.current.P, [P[k * 3], P[k * 3 + 1], P[k * 3 + 2]]); if (q.i >= 0) votes.set(vreg[q.i], (votes.get(vreg[q.i]) || 0) + 1); }
+      let best = -1, bv = -1; for (const [r, v] of votes) if (v > bv) { bv = v; best = r; }
+      if (best >= 0) name = W.seg.regions[best].name;
+    } else if (i > 0) { // a limb, named after the joint closest to it
+      let bd = Infinity;
+      for (const c of cutsWorld) for (let k = 0; k < P.length / 3; k += st) { const d = Math.hypot(P[k * 3] - c.c[0], P[k * 3 + 1] - c.c[1], P[k * 3 + 2] - c.c[2]); if (d < bd) { bd = d; name = c.a; } }
+    }
+    const n = (used.get(name) || 0) + 1; used.set(name, n); if (n > 1) name += ' ' + n;
+    return { mesh: p.mesh, name, frac: p.v / total };
+  });
+}
+function regroup(level, bed) {
+  W.preview = null;
+  // Simple: the anatomy (head, arms, legs, tail) when the model has limbs that cut cleanly; AI parts otherwise
   if (level === 'simple') {
     const bj = Seam.findBodyJoints(W.current, { res: 96 });
-    if (bj.cuts.length >= 3) {
-      const cuts = bj.cuts.slice().sort((x, y) => (y.r || 0) - (x.r || 0)).slice(0, Seam.detailOf(level).joints);
-      W.seg.mode = 'body';
-      return { cuts: cuts.map(c => cutToBase(c)), regions: [{ name: 'body' }, ...cuts.map(c => ({ name: c.a }))], mode: 'body' };
+    const cands = bj.cuts.slice().sort((x, y) => (y.r || 0) - (x.r || 0)).slice(0, Seam.detailOf(level).joints);
+    if (cands.length >= 2) {
+      const tr = trialCuts(cands, level, bed);
+      if (tr.ok.length >= 2 || !W.seg) return keep('body', tr, level);
     }
   }
-  W.seg.mode = 'ai';
+  if (!W.seg) { // plain file: anatomy at every level (elbows and knees from Balanced up)
+    const bj = Seam.findBodyJoints(W.current, { res: 96, secondary: level !== 'simple' });
+    const cands = bj.cuts.slice().sort((x, y) => (y.r || 0) - (x.r || 0)).slice(0, Seam.detailOf(level).joints);
+    return keep('body', trialCuts(cands, level, bed), level, bj.note);
+  }
   const { tri, regions } = Seam.mergeRegions(W.current, W.seg.lab, W.seg.names, Seam.detailOf(level));
   W.seg.tri = tri; W.seg.regions = regions;
-  const cuts = Seam.cutsFromRegions(W.current, tri, regions).map(c => cutToBase(c));
-  return { cuts, regions: regions.map(r => ({ name: r.name, frac: r.frac })), mode: 'ai' };
+  return keep('ai', trialCuts(Seam.cutsFromRegions(W.current, tri, regions), level, bed), level);
+}
+function keep(mode, tr, level, note) {
+  if (W.seg) W.seg.mode = mode;
+  const regions = nameRegions(tr.pieces, mode, tr.ok);
+  W.preview = { regions, key: tr.ok.map(c => c.d.toFixed(1)).join(',') };
+  return { cuts: tr.ok.map(c => cutToBase(c)), regions: regions.map(r => ({ name: r.name, frac: r.frac })), mode, note };
 }
 // smallest piece worth printing: a share of the model's volume (by detail level), and no slivers under 6 mm
 function withMinPiece(settings) {
@@ -105,12 +148,12 @@ function withMinPiece(settings) {
   const vol = Math.abs(Seam.volume(W.current));
   // never more than 1% of the bed volume, or big models on small beds could not be split at all
   const bedV = (settings.bed || [200, 200, 200]).reduce((a, b) => a * b, 1);
-  return { ...settings, minPieceVol: Math.max(Math.min(vol * det.pieceFrac, bedV * 0.01), 300), minThick: 6 };
+  return { ...settings, minPieceVol: Math.max(Math.min(vol * det.pieceFrac, bedV * 0.01), 1000), minThick: 6 };
 }
 
 const handlers = {
   sample() {
-    W.base = sampleFigure(); W.baseParts = null; W.seg = null; W.name = 'sample-bust'; W.xf = { scale: 1, up: 'z' };
+    W.base = sampleFigure(); W.baseParts = null; W.seg = null; W.preview = null; W.name = 'sample-bust'; W.xf = { scale: 1, up: 'z' };
     rebuild(); return { info: info(W.base), name: W.name, parts: 1 };
   },
   load({ name, buf }) {
@@ -127,12 +170,12 @@ const handlers = {
     if (bp) mesh = Seam.mergeMeshes(bp.map(p => p.mesh));
     let scaled = false;
     if (ext === 'glb') { const nt = normalizeTiny(mesh, bp); mesh = nt.mesh; bp = nt.parts; scaled = nt.scaled; }
-    W.base = mesh; W.baseParts = bp; W.guides = null; W.seg = null;
+    W.base = mesh; W.baseParts = bp; W.guides = null; W.seg = null; W.preview = null;
     W.name = name.replace(/\.[^.]+$/, ''); W.xf = { scale: 1, up: 'z' };
     rebuild(); return { info: info(W.base), name: W.name, parts: W.baseParts ? W.baseParts.length : 1, scaled };
   },
   // AI result made of overlapping parts: merge into one solid, keep the parts as joint guides
-  loadParts({ name, buf, res, level }) {
+  loadParts({ name, buf, res, level, bed }) {
     let parts = Seam.parseGLB(buf).filter(p => p.mesh.T.length >= 12);
     if (!parts.length) throw new Error('The AI result had no usable geometry.');
     parts = parts.map(p => ({ ...p, mesh: Seam.orientMesh(p.mesh) }));
@@ -145,32 +188,25 @@ const handlers = {
     let out = { cuts: [], regions: [] };
     if (parts.length > 1) {
       const lab = Seam.labelFromParts(W.current, nt.parts.map(p => ({ ...p, mesh: applyXf(p.mesh) })));
-      if (lab) { W.seg = { lab, names: parts.map((p, i) => p.name || 'part ' + (i + 1)) }; out = regroup(level); }
+      if (lab) { W.seg = { lab, names: parts.map((p, i) => p.name || 'part ' + (i + 1)) }; out = regroup(level, bed); }
     }
     return { info: info(W.base), name: W.name, parts: parts.length, scaled: nt.scaled, ...out };
   },
-  regroup({ level }) { return W.seg ? regroup(level) : { cuts: [], regions: [] }; },
+  regroup({ level, bed }) { return regroup(level, bed); },
   // colored preview of the parts before splitting
-  segPreview({ cuts }) {
-    const transfer = [], total = Math.abs(Seam.volume(W.current)) || 1;
-    const pack = (m, name, frac) => { const rd = Seam.renderData(m), b = Seam.bbox(m); transfer.push(rd.pos.buffer, rd.nrm.buffer, rd.cut.buffer); return { name, frac, render: rd, center: b.center, min: b.min, max: b.max }; };
-    if (W.seg && W.seg.mode === 'ai' && W.seg.tri) {
-      const groups = W.seg.regions.map(() => []);
-      for (let t = 0; t < W.seg.tri.length; t++) groups[W.seg.tri[t]].push(t);
-      return { regions: groups.map((g, i) => pack(Seam.subMesh(W.current, g), W.seg.regions[i].name, W.seg.regions[i].frac)), transfer };
+  segPreview({ cuts, level, bed }) {
+    const transfer = [];
+    const wc = (cuts || []).map(cutToWorld);
+    const key = wc.map(c => c.d.toFixed(1)).join(',');
+    if (!W.preview || W.preview.key !== key) { // joints were ticked or unticked
+      if (!wc.length) return { regions: [] };
+      const tr = trialCuts(wc, level, bed);
+      W.preview = { regions: nameRegions(tr.pieces, W.seg ? W.seg.mode : 'body', tr.ok), key };
     }
-    // anatomy: cut for real (no connectors) so the colors show exactly the pieces you'll get
-    if (!cuts || !cuts.length) return { regions: [] };
-    const wc = cuts.map(cutToWorld);
-    const g = Seam.applyGuidedCuts([{ mesh: W.current }], wc, { connector: { type: 'none' }, label: false });
-    const pcs = g.pieces.map(p => ({ mesh: p.mesh, v: Math.abs(Seam.volume(p.mesh)) })).sort((x, y) => y.v - x.v);
-    const regions = pcs.map((p, i) => {
-      let name = 'body';
-      if (i > 0) { // name a limb after the joint closest to it
-        let bd = Infinity; const P = p.mesh.P, st = Math.max(1, Math.floor(P.length / 3 / 2000));
-        for (const c of wc) for (let k = 0; k < P.length / 3; k += st) { const d = Math.hypot(P[k * 3] - c.c[0], P[k * 3 + 1] - c.c[1], P[k * 3 + 2] - c.c[2]); if (d < bd) { bd = d; name = c.a; } }
-      }
-      return pack(p.mesh, name, p.v / total);
+    const regions = W.preview.regions.map(r => {
+      const rd = Seam.renderData(r.mesh), b = Seam.bbox(r.mesh);
+      transfer.push(rd.pos.buffer, rd.nrm.buffer, rd.cut.buffer);
+      return { name: r.name, frac: r.frac, render: rd, center: b.center, min: b.min, max: b.max };
     });
     return { regions, transfer };
   },
@@ -210,13 +246,8 @@ const handlers = {
     if (r.error) throw new Error(r.error);
     return { cuts: r.cuts.map(c => cutToBase({ a: c.a, b: c.b, c: c.c, n: c.n, d: c.d, size: c.size, spots: c.spots })), partNames: parts.map(p => p.name) };
   },
-  bodyJoints({ level }) {
-    const det = Seam.detailOf(level);
-    const r = Seam.findBodyJoints(W.current, { res: 96, secondary: level !== 'simple' });
-    // biggest joints first; simple keeps head, arms, legs (or tail) only
-    const cuts = r.cuts.slice().sort((a, b) => (b.r || 0) - (a.r || 0)).slice(0, det.joints);
-    return { cuts: cuts.map(c => cutToBase(c)), note: r.note };
-  },
+  bodyJoints({ level, bed }) { const r = regroup(level, bed); return { cuts: r.cuts, note: r.note }; },
+
   toWorld({ cuts }) { return { rings: cuts.map(c => { const w = cutToWorld(c); return { c: w.c, n: w.n, r: (c.r || 0) * W.X.s }; }) }; },
   wholeSTL() {
     const m = W.current;

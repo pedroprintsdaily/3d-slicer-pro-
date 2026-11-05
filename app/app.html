@@ -628,7 +628,7 @@ async function showRings(active) {
 }
 // ---------------------------------------------------------------- built-in body joints
 async function findBody(auto) {
-  const r = await call('bodyJoints', { level: level() });
+  const r = await call('bodyJoints', { level: level(), bed: bed() });
   S.guided = r.cuts.map(c => ({ ...c, on: true })); renderJoints();
   $('jointsHint').textContent = S.guided.length
     ? `Found ${S.guided.length} joint${S.guided.length > 1 ? 's' : ''}. Untick any you don't want, then Split. Cut faces get connectors and numbers like any other cut.`
@@ -640,7 +640,7 @@ $('bodyGo').onclick = () => busy('Finding body joints…', async () => { await f
 function level() { return document.querySelector('input[name=detail]:checked').value; }
 document.querySelectorAll('input[name=detail]').forEach(el => el.addEventListener('change', () => {
   if (!S.pieces.length) return;
-  if (S.seg) busy('Grouping parts…', async () => { const r = await call('regroup', { level: level() }); S.guided = r.cuts.map(c => ({ ...c, on: true })); renderJoints(); await showSegments(); });
+  if (S.seg) busy('Grouping parts…', async () => { const r = await call('regroup', { level: level(), bed: bed() }); S.guided = r.cuts.map(c => ({ ...c, on: true })); renderJoints(); await showSegments(); });
   else busy('Finding body joints…', async () => { await findBody(false); await showSegments(); });
 }));
 // colored parts before splitting (like Tripo's part list): AI parts, or the anatomy cuts on any model
@@ -649,7 +649,7 @@ async function showSegments() {
   const box = $('segList'), seq = ++segSeq;
   const on = S.guided.filter(g => g.on);
   if (S.pieces.length !== 1 || (!S.seg && !on.length)) { box.hidden = true; return; }
-  const r = await call('segPreview', { cuts: on.map(g => ({ a: g.a, b: g.b, c: g.c, n: g.n, d: g.d, spots: g.spots })) });
+  const r = await call('segPreview', { cuts: on.map(g => ({ a: g.a, b: g.b, c: g.c, n: g.n, d: g.d, spots: g.spots })), level: level(), bed: bed() });
   if (seq !== segSeq || S.pieces.length !== 1) return;
   box.innerHTML = '';
   if (!r.regions.length) { box.hidden = true; viewer.setPieces(S.pieces, S.colors); return; }
@@ -731,7 +731,7 @@ $('picGo').onclick = () => {
     const base = picFile.name.replace(/\.[^.]+$/, '');
     let r;
     if (j.kind === 'split') r = await call('load', { name: base + '.glb', buf }, [buf]);
-    else r = await call('loadParts', { name: base, buf, res: +$('mergeRes').value, level: level() }, [buf]);
+    else r = await call('loadParts', { name: base, buf, res: +$('mergeRes').value, level: level(), bed: bed() }, [buf]);
     S.colors = []; S.sel = -1; S.guided = (r.cuts || []).map(c => ({ ...c, on: true })); renderJoints();
     S.seg = (r.regions || []).length > 1; S.split = false;
     renderModel({ ...r, parts: j.kind === 'split' ? r.parts : 1 }); applyResult(r); viewer.fit();

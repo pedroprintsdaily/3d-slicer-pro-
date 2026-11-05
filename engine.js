@@ -1295,9 +1295,9 @@ function nearestInGrid(grid, P, p) {
 }
 // Detail levels, like Tripo's segmentation: how many parts, and how small a part may be
 const DETAIL = {
-  simple:   { maxParts: 5,  minFrac: 0.04,  pieceFrac: 0.012, joints: 5 },
-  balanced: { maxParts: 15, minFrac: 0.012, pieceFrac: 0.004, joints: 14 },
-  detailed: { maxParts: 40, minFrac: 0.003, pieceFrac: 0.0015, joints: 40 },
+  simple:   { maxParts: 5,  minFrac: 0.04,  pieceFrac: 0.03,  joints: 5 },
+  balanced: { maxParts: 15, minFrac: 0.012, pieceFrac: 0.01,  joints: 14 },
+  detailed: { maxParts: 40, minFrac: 0.003, pieceFrac: 0.004, joints: 40 },
 };
 function detailOf(level) { return DETAIL[level] || DETAIL.balanced; }
 
@@ -1474,7 +1474,7 @@ function applyGuidedCuts(pieces, cuts, settings) {
     if (r.error) { notes.push(`Skipped ${c.a} / ${c.b}: ${r.error}`); continue; }
     const comps = []; for (const half of [r.below, r.above]) for (const comp of components(half)) if (comp.T.length >= 12) comps.push(comp);
     if (comps.some(m => tinyPiece(m, settings, c.n))) { notes.push(`Kept ${c.a} / ${c.b} together: the cut would leave a piece too small to print.`); continue; }
-    cutId++; r.report.joint = c.a + ' / ' + c.b; reports.push(r.report);
+    cutId++; r.report.joint = c.a + ' / ' + c.b; Object.defineProperty(r.report, 'src', { value: c, enumerable: false }); reports.push(r.report);
     const rest = list.filter((_, i) => i !== bestI);
     for (const comp of comps) rest.push({ mesh: comp, avoid: [] });
     list = rest;
@@ -2060,7 +2060,7 @@ function renderData(m) {
 const api = {
   makeMesh, bbox, volume, weldSoup, weldIndexed, subMesh, translateMesh, scaleMesh, rotateMesh, mergeMeshes, components, edgeStats, orientMesh, fillHoles,
   basisFor, fitPlane, earcut, loopArea, pointInLoops, distToLoops, poleOfInaccessibility, sectionLoops, groupIslands, sectionAreas,
-  cutMesh, fitsBed, layFlat, rotationTo, voxelUnion, taubin, findBodyJoints, solidGrid, chooseCut, autoSplit, proposeGuidedCuts, applyGuidedCuts, DETAIL, detailOf, labelFromParts, mergeRegions, cutsFromRegions, tinyPiece, assemblyMap, cylinderMesh, dowelMesh,
+  cutMesh, fitsBed, layFlat, rotationTo, voxelUnion, taubin, findBodyJoints, solidGrid, chooseCut, autoSplit, proposeGuidedCuts, applyGuidedCuts, DETAIL, detailOf, buildGrid, nearestInGrid, labelFromParts, mergeRegions, cutsFromRegions, tinyPiece, assemblyMap, cylinderMesh, dowelMesh,
   parseSTL, parseOBJ, parseGLB, stlBinary, threeMF, zipStore, crc32, renderData, textDots,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Seam = api;

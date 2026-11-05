@@ -917,9 +917,32 @@ function cutMeshOnce(mesh, plane, opts = {}) {
         }
       }
     }
-    for (let t = 0; t < ntt; t++) if (side[t] === -1) {
-      const v = [outT[t * 3], outT[t * 3 + 1], outT[t * 3 + 2]].map(posOf);
-      side[t] = (dot(v[0], n) + dot(v[1], n) + dot(v[2], n)) / 3 - d > 0 ? 1 : 0;
+    // Regions not reached across edges (joined only at a single touching vertex, or separate shells)
+    // follow the side of a neighbour sharing a vertex; anything still left stays whole on its majority side.
+    let left = 0; for (let t = 0; t < ntt; t++) if (side[t] === -1) left++;
+    if (left) {
+      const vt = new Map();
+      for (let t = 0; t < ntt; t++) for (let k = 0; k < 3; k++) { const v = outT[t * 3 + k]; let l = vt.get(v); if (!l) { l = []; vt.set(v, l); } l.push(t); }
+      const q = []; for (let t = 0; t < ntt; t++) if (side[t] >= 0) q.push(t);
+      const spread = () => {
+        while (q.length) {
+          const t = q.pop();
+          for (let k = 0; k < 3; k++) {
+            // across edges first (same region), then across shared vertices
+            const l = edgeMap.get(ekey(outT[t * 3 + k], outT[t * 3 + (k + 1) % 3]));
+            if (l) for (const o of l) if (side[o] === -1) { side[o] = side[t]; q.push(o); }
+            for (const o of vt.get(outT[t * 3 + k])) if (side[o] === -1) { side[o] = side[t]; q.push(o); }
+          }
+        }
+      };
+      spread();
+      for (let t0 = 0; t0 < ntt; t0++) if (side[t0] === -1) {
+        // separate shell: collect it, put it all on its majority side
+        const reg = [t0], seen = new Set([t0]);
+        for (let i = 0; i < reg.length; i++) { const t = reg[i]; for (let k = 0; k < 3; k++) for (const o of vt.get(outT[t * 3 + k])) if (side[o] === -1 && !seen.has(o)) { seen.add(o); reg.push(o); } }
+        let up = 0; for (const t of reg) { const v = [outT[t * 3], outT[t * 3 + 1], outT[t * 3 + 2]].map(posOf); up += (dot(v[0], n) + dot(v[1], n) + dot(v[2], n)) / 3 - d > 0 ? 1 : -1; }
+        for (const t of reg) side[t] = up > 0 ? 1 : 0;
+      }
     }
   }
 

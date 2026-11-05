@@ -1656,24 +1656,38 @@ function findBodyJoints(mesh, opts = {}) {
       }
     }
   });
-  // name the parts from where they sit relative to the core (up axis, left/right across it)
-  const side = (() => { const ax = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].filter(a => Math.abs(dot(a, upn)) < 0.5); return ax[0] || [1, 0, 0]; })();
-  const tipInfo = tips.map(t => { const v = sub(world(t), coreW); return { up: dot(v, upn), side: dot(v, side), tip: t }; });
+  // name the parts from where their tips sit: height on the model, left/right, front/back
+  const axes = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].filter(a => Math.abs(dot(a, upn)) < 0.5);
+  const side = axes[0] || [1, 0, 0], fwdAx = axes[1] || [0, 1, 0];
+  const mb = bbox(mesh), H = Math.abs(dot(mb.size, upn)) || 1, z0 = dot(mb.min, upn.map(Math.abs));
+  const tipInfo = tips.map(t => { const w = world(t), v = sub(w, coreW); return { up: dot(v, upn), side: dot(v, side), back: dot(v, fwdAx), f: (dot(w, upn.map(Math.abs)) - z0) / H }; });
   const juncs = cuts.filter(c => c.kind === 'junction');
-  const headTip = juncs.length ? juncs.reduce((b, c) => (tipInfo[c.tip].up > tipInfo[b.tip].up ? c : b)).tip : -1;
+  const headTip = juncs.length ? juncs.reduce((bst, c) => (tipInfo[c.tip].up > tipInfo[bst.tip].up ? c : bst)).tip : -1;
+  const counts = {};
   const label = c => {
-    const ti = tipInfo[c.tip], jv = sub(c.c, coreW), lr = Math.abs(ti.side) < R * h * 0.5 ? '' : (ti.side > 0 ? 'left ' : 'right ');
-    if (c.tip === headTip && ti.up > 0 && Math.abs(ti.side) < Math.abs(ti.up)) return 'head';
-    if (dot(jv, upn) > -R * h * 0.3 && ti.up > -Math.abs(ti.side) * 3) return lr + 'arm';
-    if (ti.up < 0 && Math.abs(ti.side) < Math.abs(ti.up) * 0.6 && lr === '') return 'tail or base';
-    return lr + 'leg';
+    const ti = tipInfo[c.tip], lr = Math.abs(ti.side) < R * h * 0.6 ? '' : (ti.side > 0 ? 'left ' : 'right ');
+    const ax = Math.abs(ti.side), ab = Math.abs(ti.back), au = Math.abs(ti.up);
+    if (c.tip === headTip && ti.up > 0 && ti.f > 0.75 && ax < au && ab < au) return 'head';
+    if (ti.f < 0.18 && ti.up < 0 && ax < au * 1.2 && ab < au * 1.2) return lr + 'leg';
+    if (ab > ax && ab > au * 0.8) return ti.back > 0 ? (ti.f > 0.5 ? 'back piece' : 'tail') : 'front piece';
+    if (ax >= ab && ti.f >= 0.18 && ti.f <= 0.95 && ax > au * 0.5) return lr + 'arm';
+    if (ti.up > 0 && au > ax && ti.f > 0.75) return 'top piece';
+    return 'part';
   };
   for (const c of cuts) {
-    const base = label(c);
-    if (c.kind === 'junction') { c.a = base; c.b = 'body'; }
-    else { const joint = /arm/.test(base) ? 'elbow' : /leg/.test(base) ? 'knee' : 'joint'; c.a = base.replace(/(arm|leg)$/, '') + joint; c.b = base; }
-    c.key = c.a + '|' + c.b;
+    let base = label(c);
+    if (c.kind === 'junction') {
+      counts[base] = (counts[base] || 0) + 1;
+      if (counts[base] > 1 || ['part', 'back piece', 'front piece', 'top piece'].includes(base)) base = base + ' ' + counts[base];
+      c.a = base; c.b = 'body'; c.base = base;
+    }
   }
+  for (const c of cuts) if (c.kind !== 'junction') {
+    const parent = cuts.find(j => j.kind === 'junction' && j.tip === c.tip), base = parent ? parent.base : label(c);
+    const joint = /arm/.test(base) ? 'elbow' : /leg/.test(base) ? 'knee' : 'joint';
+    c.a = base.replace(/(arm|leg)$/, '') + joint; c.b = base;
+  }
+  for (const c of cuts) { c.key = c.a + '|' + c.b; delete c.base; }
   return { cuts: cuts.map(({ tip, kind, ...rest }) => ({ ...rest, kind })), core: coreW, tips: tips.map(world), voxel: h };
 }
 

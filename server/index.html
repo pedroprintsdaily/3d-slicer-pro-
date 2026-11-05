@@ -1970,24 +1970,38 @@ function findBodyJoints(mesh, opts = {}) {
       }
     }
   });
-  // name the parts from where they sit relative to the core (up axis, left/right across it)
-  const side = (() => { const ax = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].filter(a => Math.abs(dot(a, upn)) < 0.5); return ax[0] || [1, 0, 0]; })();
-  const tipInfo = tips.map(t => { const v = sub(world(t), coreW); return { up: dot(v, upn), side: dot(v, side), tip: t }; });
+  // name the parts from where their tips sit: height on the model, left/right, front/back
+  const axes = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].filter(a => Math.abs(dot(a, upn)) < 0.5);
+  const side = axes[0] || [1, 0, 0], fwdAx = axes[1] || [0, 1, 0];
+  const mb = bbox(mesh), H = Math.abs(dot(mb.size, upn)) || 1, z0 = dot(mb.min, upn.map(Math.abs));
+  const tipInfo = tips.map(t => { const w = world(t), v = sub(w, coreW); return { up: dot(v, upn), side: dot(v, side), back: dot(v, fwdAx), f: (dot(w, upn.map(Math.abs)) - z0) / H }; });
   const juncs = cuts.filter(c => c.kind === 'junction');
-  const headTip = juncs.length ? juncs.reduce((b, c) => (tipInfo[c.tip].up > tipInfo[b.tip].up ? c : b)).tip : -1;
+  const headTip = juncs.length ? juncs.reduce((bst, c) => (tipInfo[c.tip].up > tipInfo[bst.tip].up ? c : bst)).tip : -1;
+  const counts = {};
   const label = c => {
-    const ti = tipInfo[c.tip], jv = sub(c.c, coreW), lr = Math.abs(ti.side) < R * h * 0.5 ? '' : (ti.side > 0 ? 'left ' : 'right ');
-    if (c.tip === headTip && ti.up > 0 && Math.abs(ti.side) < Math.abs(ti.up)) return 'head';
-    if (dot(jv, upn) > -R * h * 0.3 && ti.up > -Math.abs(ti.side) * 3) return lr + 'arm';
-    if (ti.up < 0 && Math.abs(ti.side) < Math.abs(ti.up) * 0.6 && lr === '') return 'tail or base';
-    return lr + 'leg';
+    const ti = tipInfo[c.tip], lr = Math.abs(ti.side) < R * h * 0.6 ? '' : (ti.side > 0 ? 'left ' : 'right ');
+    const ax = Math.abs(ti.side), ab = Math.abs(ti.back), au = Math.abs(ti.up);
+    if (c.tip === headTip && ti.up > 0 && ti.f > 0.75 && ax < au && ab < au) return 'head';
+    if (ti.f < 0.18 && ti.up < 0 && ax < au * 1.2 && ab < au * 1.2) return lr + 'leg';
+    if (ab > ax && ab > au * 0.8) return ti.back > 0 ? (ti.f > 0.5 ? 'back piece' : 'tail') : 'front piece';
+    if (ax >= ab && ti.f >= 0.18 && ti.f <= 0.95 && ax > au * 0.5) return lr + 'arm';
+    if (ti.up > 0 && au > ax && ti.f > 0.75) return 'top piece';
+    return 'part';
   };
   for (const c of cuts) {
-    const base = label(c);
-    if (c.kind === 'junction') { c.a = base; c.b = 'body'; }
-    else { const joint = /arm/.test(base) ? 'elbow' : /leg/.test(base) ? 'knee' : 'joint'; c.a = base.replace(/(arm|leg)$/, '') + joint; c.b = base; }
-    c.key = c.a + '|' + c.b;
+    let base = label(c);
+    if (c.kind === 'junction') {
+      counts[base] = (counts[base] || 0) + 1;
+      if (counts[base] > 1 || ['part', 'back piece', 'front piece', 'top piece'].includes(base)) base = base + ' ' + counts[base];
+      c.a = base; c.b = 'body'; c.base = base;
+    }
   }
+  for (const c of cuts) if (c.kind !== 'junction') {
+    const parent = cuts.find(j => j.kind === 'junction' && j.tip === c.tip), base = parent ? parent.base : label(c);
+    const joint = /arm/.test(base) ? 'elbow' : /leg/.test(base) ? 'knee' : 'joint';
+    c.a = base.replace(/(arm|leg)$/, '') + joint; c.b = base;
+  }
+  for (const c of cuts) { c.key = c.a + '|' + c.b; delete c.base; }
   return { cuts: cuts.map(({ tip, kind, ...rest }) => ({ ...rest, kind })), core: coreW, tips: tips.map(world), voxel: h };
 }
 
@@ -2369,6 +2383,7 @@ const handlers = {
     const r = Seam.findBodyJoints(W.current, { res: 96, secondary: !!secondary });
     return { cuts: r.cuts.map(c => cutToBase(c)), note: r.note };
   },
+  toWorld({ cuts }) { return { rings: cuts.map(c => { const w = cutToWorld(c); return { c: w.c, n: w.n, r: (c.r || 0) * W.X.s }; }) }; },
   wholeSTL() {
     const m = W.current;
     return { stl: Seam.stlBinary(m, W.name).buffer };
@@ -2718,9 +2733,20 @@ function renderJoints() {
   S.guided.forEach((g, i) => {
     const l = document.createElement('label'); l.className = 'check';
     l.innerHTML = `<input type="checkbox" id="j${i}"><span></span>`;
-    l.querySelector('input').checked = g.on; l.querySelector('input').onchange = e => { g.on = e.target.checked; };
+    l.querySelector('input').checked = g.on; l.querySelector('input').onchange = e => { g.on = e.target.checked; showRings(i); };
     l.querySelector('span').textContent = `${g.a} / ${g.b}`; box.appendChild(l);
+    l.addEventListener('mouseenter', () => showRings(i)); l.addEventListener('click', e => { if (e.target.tagName !== 'INPUT') showRings(i); });
   });
+  showRings(-1);
+}
+// joint rings in the 3D view (selected one bright)
+let ringSeq = 0;
+async function showRings(active) {
+  const seq = ++ringSeq;
+  if (!S.guided.length) { viewer.setRings([], -1); return; }
+  const r = await call('toWorld', { cuts: S.guided.map(g => ({ c: g.c, n: g.n, d: g.d, r: g.r, spots: [] })) });
+  if (seq !== ringSeq) return;
+  viewer.setRings(r.rings.map((x, i) => ({ ...x, on: S.guided[i].on })), active);
 }
 // ---------------------------------------------------------------- built-in body joints
 async function findBody(auto) {
@@ -2841,6 +2867,7 @@ const viewer = (() => {
     `precision mediump float; uniform vec3 uCol; void main(){ gl_FragColor = vec4(uCol,1.0); }`);
   const lineP = prog(`attribute vec3 aP; uniform mat4 uM; void main(){ gl_Position = uM*vec4(aP,1.0); }`,
     `precision mediump float; uniform vec4 uCol; void main(){ gl_FragColor = uCol; }`);
+  let rings = [], ringActive = -1;
   let items = [], selected = -1, explode = 0, plane = null, bedSize = [256, 256, 256], marginV = 5, showBed = true;
   const cam = { yaw: -2.2, pitch: 0.42, dist: 1000, target: [0, 0, 150], fov: 0.75 };
   let center = [0, 0, 0], extent = 100;
@@ -2922,6 +2949,19 @@ const viewer = (() => {
       lines([...rect(bx / 2, by / 2, top), cx - bx / 2, cy - by / 2, z, cx - bx / 2, cy - by / 2, top, cx + bx / 2, cy - by / 2, z, cx + bx / 2, cy - by / 2, top, cx + bx / 2, cy + by / 2, z, cx + bx / 2, cy + by / 2, top, cx - bx / 2, cy + by / 2, z, cx - bx / 2, cy + by / 2, top], [...grid, 0.28], gl.LINES);
       gl.disable(gl.BLEND);
     }
+    if (rings.length && explode === 0) {
+      const acc = hex(css('--accent') || '#a9561b');
+      gl.disable(gl.DEPTH_TEST); gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      rings.forEach((g, i) => {
+        if (!g.on && i !== ringActive) return;
+        const n = g.n, a = Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+        const e1 = norm3(cross3(a, n)), e2 = cross3(n, e1), r = Math.max(g.r * 1.8, extent * 0.02), pts = [];
+        for (let k = 0; k <= 40; k++) { const t = 2 * Math.PI * k / 40, u = Math.cos(t) * r, v = Math.sin(t) * r; pts.push(g.c[0] + e1[0] * u + e2[0] * v, g.c[1] + e1[1] * u + e2[1] * v, g.c[2] + e1[2] * u + e2[2] * v); }
+        const seg = []; for (let k = 0; k < 40; k++) seg.push(...pts.slice(k * 3, k * 3 + 3), ...pts.slice(k * 3 + 3, k * 3 + 6));
+        lines(seg, [...acc, i === ringActive ? 1 : 0.45], gl.LINES);
+      });
+      gl.disable(gl.BLEND); gl.enable(gl.DEPTH_TEST);
+    }
     if (plane && items[plane.index]) {
       const o = offs(plane.index), ax = plane.axis, pad = 6, mn = plane.min.map((v, a) => v - pad + o[a]), mx = plane.max.map((v, a) => v + pad + o[a]);
       const p = plane.pos + o[ax]; const q = (u, v) => { const r = [0, 0, 0]; r[ax] = p; r[(ax + 1) % 3] = u; r[(ax + 2) % 3] = v; return r; };
@@ -2987,6 +3027,7 @@ const viewer = (() => {
     setSelected(i) { selected = i; draw(); },
     setExplode(v) { explode = v; draw(); },
     setPlane(p) { plane = p; draw(); },
+    setRings(list, active) { rings = list; ringActive = active; draw(); },
     setBed(b, m) { bedSize = b; marginV = m; draw(); },
     toggleBed() { showBed = !showBed; draw(); return showBed; },
   };

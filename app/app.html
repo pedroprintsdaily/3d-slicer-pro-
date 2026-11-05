@@ -601,9 +601,20 @@ function renderJoints() {
   S.guided.forEach((g, i) => {
     const l = document.createElement('label'); l.className = 'check';
     l.innerHTML = `<input type="checkbox" id="j${i}"><span></span>`;
-    l.querySelector('input').checked = g.on; l.querySelector('input').onchange = e => { g.on = e.target.checked; };
+    l.querySelector('input').checked = g.on; l.querySelector('input').onchange = e => { g.on = e.target.checked; showRings(i); };
     l.querySelector('span').textContent = `${g.a} / ${g.b}`; box.appendChild(l);
+    l.addEventListener('mouseenter', () => showRings(i)); l.addEventListener('click', e => { if (e.target.tagName !== 'INPUT') showRings(i); });
   });
+  showRings(-1);
+}
+// joint rings in the 3D view (selected one bright)
+let ringSeq = 0;
+async function showRings(active) {
+  const seq = ++ringSeq;
+  if (!S.guided.length) { viewer.setRings([], -1); return; }
+  const r = await call('toWorld', { cuts: S.guided.map(g => ({ c: g.c, n: g.n, d: g.d, r: g.r, spots: [] })) });
+  if (seq !== ringSeq) return;
+  viewer.setRings(r.rings.map((x, i) => ({ ...x, on: S.guided[i].on })), active);
 }
 // ---------------------------------------------------------------- built-in body joints
 async function findBody(auto) {
@@ -724,6 +735,7 @@ const viewer = (() => {
     `precision mediump float; uniform vec3 uCol; void main(){ gl_FragColor = vec4(uCol,1.0); }`);
   const lineP = prog(`attribute vec3 aP; uniform mat4 uM; void main(){ gl_Position = uM*vec4(aP,1.0); }`,
     `precision mediump float; uniform vec4 uCol; void main(){ gl_FragColor = uCol; }`);
+  let rings = [], ringActive = -1;
   let items = [], selected = -1, explode = 0, plane = null, bedSize = [256, 256, 256], marginV = 5, showBed = true;
   const cam = { yaw: -2.2, pitch: 0.42, dist: 1000, target: [0, 0, 150], fov: 0.75 };
   let center = [0, 0, 0], extent = 100;
@@ -805,6 +817,19 @@ const viewer = (() => {
       lines([...rect(bx / 2, by / 2, top), cx - bx / 2, cy - by / 2, z, cx - bx / 2, cy - by / 2, top, cx + bx / 2, cy - by / 2, z, cx + bx / 2, cy - by / 2, top, cx + bx / 2, cy + by / 2, z, cx + bx / 2, cy + by / 2, top, cx - bx / 2, cy + by / 2, z, cx - bx / 2, cy + by / 2, top], [...grid, 0.28], gl.LINES);
       gl.disable(gl.BLEND);
     }
+    if (rings.length && explode === 0) {
+      const acc = hex(css('--accent') || '#a9561b');
+      gl.disable(gl.DEPTH_TEST); gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      rings.forEach((g, i) => {
+        if (!g.on && i !== ringActive) return;
+        const n = g.n, a = Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+        const e1 = norm3(cross3(a, n)), e2 = cross3(n, e1), r = Math.max(g.r * 1.8, extent * 0.02), pts = [];
+        for (let k = 0; k <= 40; k++) { const t = 2 * Math.PI * k / 40, u = Math.cos(t) * r, v = Math.sin(t) * r; pts.push(g.c[0] + e1[0] * u + e2[0] * v, g.c[1] + e1[1] * u + e2[1] * v, g.c[2] + e1[2] * u + e2[2] * v); }
+        const seg = []; for (let k = 0; k < 40; k++) seg.push(...pts.slice(k * 3, k * 3 + 3), ...pts.slice(k * 3 + 3, k * 3 + 6));
+        lines(seg, [...acc, i === ringActive ? 1 : 0.45], gl.LINES);
+      });
+      gl.disable(gl.BLEND); gl.enable(gl.DEPTH_TEST);
+    }
     if (plane && items[plane.index]) {
       const o = offs(plane.index), ax = plane.axis, pad = 6, mn = plane.min.map((v, a) => v - pad + o[a]), mx = plane.max.map((v, a) => v + pad + o[a]);
       const p = plane.pos + o[ax]; const q = (u, v) => { const r = [0, 0, 0]; r[ax] = p; r[(ax + 1) % 3] = u; r[(ax + 2) % 3] = v; return r; };
@@ -870,6 +895,7 @@ const viewer = (() => {
     setSelected(i) { selected = i; draw(); },
     setExplode(v) { explode = v; draw(); },
     setPlane(p) { plane = p; draw(); },
+    setRings(list, active) { rings = list; ringActive = active; draw(); },
     setBed(b, m) { bedSize = b; marginV = m; draw(); },
     toggleBed() { showBed = !showBed; draw(); return showBed; },
   };

@@ -162,6 +162,7 @@ const handlers = {
     const r = Seam.findBodyJoints(W.current, { res: 96, secondary: !!secondary });
     return { cuts: r.cuts.map(c => cutToBase(c)), note: r.note };
   },
+  toWorld({ cuts }) { return { rings: cuts.map(c => { const w = cutToWorld(c); return { c: w.c, n: w.n, r: (c.r || 0) * W.X.s }; }) }; },
   wholeSTL() {
     const m = W.current;
     return { stl: Seam.stlBinary(m, W.name).buffer };

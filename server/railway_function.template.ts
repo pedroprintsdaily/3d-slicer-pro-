@@ -101,6 +101,7 @@ async function gradio(base: string, name: string, data: unknown[], token: string
   if (!last) throw new UpErr(502, `PartPacker ${name}: no result (${txt.slice(-200).replace(/\s+/g, " ")})`);
   if (!last.success) {
     const msg = last.output?.error || last.title || "the demo reported an error with no details";
+    if (/ZeroGPU quota/i.test(String(msg))) throw new UpErr(429, "Hugging Face's free GPU time for this token is used up for now (it refills over the day). Try again later, use a Hugging Face PRO token, or pick Tripo/Meshy.");
     throw new UpErr(502, `PartPacker ${name}: ${msg}`);
   }
   return last.output.data;
